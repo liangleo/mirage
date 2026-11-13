@@ -13,7 +13,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -21,10 +20,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 @Composable
-fun ConnectScreen(onConnect: (String, Int) -> Unit) {
+fun ConnectScreen(
+    status: String,
+    onConnect: (String, Int) -> Unit
+) {
     var host by rememberSaveable { mutableStateOf("127.0.0.1") }
     var port by rememberSaveable { mutableStateOf("7777") }
-    var status by remember { mutableStateOf("未连接") }
+    var localError by rememberSaveable { mutableStateOf<String?>(null) }
 
     Column(
         modifier = Modifier
@@ -52,15 +54,15 @@ fun ConnectScreen(onConnect: (String, Int) -> Unit) {
         Button(onClick = {
             val portNumber = port.toIntOrNull()
             if (portNumber == null) {
-                status = "端口无效"
+                localError = "端口无效"
             } else {
-                status = "连接中…"
+                localError = null
                 onConnect(host, portNumber)
             }
         }) {
             Text("连接")
         }
         Spacer(Modifier.height(12.dp))
-        Text(status, style = MaterialTheme.typography.bodyMedium)
+        Text(localError ?: status, style = MaterialTheme.typography.bodyMedium)
     }
 }

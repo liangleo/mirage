@@ -49,7 +49,8 @@ class AspectSurfaceView @JvmOverloads constructor(
 @Composable
 fun VideoView(
     modifier: Modifier = Modifier,
-    onSurfaceReady: (AspectSurfaceView, Surface) -> Unit
+    onSurfaceReady: (AspectSurfaceView, Surface) -> Unit,
+    onSurfaceDestroyed: () -> Unit = {}
 ) {
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         AndroidView(
@@ -68,7 +69,9 @@ fun VideoView(
                             height: Int
                         ) = Unit
 
-                        override fun surfaceDestroyed(holder: SurfaceHolder) = Unit
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            onSurfaceDestroyed()
+                        }
                     })
                 }
             }
