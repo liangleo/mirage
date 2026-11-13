@@ -30,6 +30,7 @@ public final class MirageServer: @unchecked Sendable {
         }
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: 0)
 
         let listener = try NWListener(using: parameters, on: nwPort)
         listener.newConnectionHandler = { [weak self] connection in

@@ -10,6 +10,7 @@ public enum SessionAction: Equatable {
 public final class Session: @unchecked Sendable {
     private let config: SessionConfig
     private var lastOutboundMicros: UInt64 = 0
+    private var lastPingTimestamp: UInt64?
 
     public init(config: SessionConfig) {
         self.config = config
@@ -33,8 +34,12 @@ public final class Session: @unchecked Sendable {
             }
 
         case MessageType.ping.rawValue:
-            guard (try? decodePing(frame.payload)) != nil else {
+            guard let timestamp = try? decodePing(frame.payload) else {
                 return [.close(reason: "malformed ping")]
+            }
+            if timestamp == lastPingTimestamp {
+                lastPingTimestamp = nil
+                return []
             }
             lastOutboundMicros = nowMicros
             return [.send(Frame(type: MessageType.ping.rawValue, payload: frame.payload))]
@@ -53,6 +58,7 @@ public final class Session: @unchecked Sendable {
     public func tick(nowMicros: UInt64) -> [SessionAction] {
         guard nowMicros >= lastOutboundMicros + 1_000_000 else { return [] }
         lastOutboundMicros = nowMicros
+        lastPingTimestamp = nowMicros
         guard let frame = singleFrame(encodePing(timestamp: nowMicros)) else { return [] }
         return [.send(frame)]
     }

@@ -10,8 +10,7 @@ public final class HelperApp: @unchecked Sendable {
     private let fps: Int
     private let bitrate: Int
 
-    private let keyframeLock = NSLock()
-    private var pendingKeyframe = true
+    private let keyframes = KeyframeController()
     private var encoder: VideoEncoder?
     private var capture: DisplayCapture?
     private var server: MirageServer?
@@ -52,13 +51,16 @@ public final class HelperApp: @unchecked Sendable {
         }
         self.server = server
 
-        encoder.onFrame = { [weak server] frame in
+        encoder.onFrame = { [weak self, weak server] frame in
+            if frame.header.flags & 1 == 1 {
+                self?.keyframes.noteKeyframe(nowMicros: frame.header.captureTimestampMicros)
+            }
             server?.broadcast(frame)
         }
 
         let capture = DisplayCapture(displayID: displayID, fps: fps, size: size) { [weak self] pixelBuffer, micros in
             guard let self, let encoder = self.encoder else { return }
-            let forceKeyframe = self.consumeKeyframeRequest()
+            let forceKeyframe = self.keyframes.shouldForce(nowMicros: micros)
             let pts = CMTime(value: Int64(micros), timescale: 1_000_000)
             do {
                 try encoder.encode(pixelBuffer, pts: pts, forceKeyframe: forceKeyframe)
@@ -81,17 +83,8 @@ public final class HelperApp: @unchecked Sendable {
     }
 
     private func requestKeyframe() {
-        keyframeLock.lock()
-        pendingKeyframe = true
-        keyframeLock.unlock()
-    }
-
-    private func consumeKeyframeRequest() -> Bool {
-        keyframeLock.lock()
-        defer { keyframeLock.unlock() }
-        let value = pendingKeyframe
-        pendingKeyframe = false
-        return value
+        keyframes.request()
+        capture?.requestFrame()
     }
 }
 

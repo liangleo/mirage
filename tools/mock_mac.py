@@ -4,7 +4,6 @@
 Useful for developing the Android app without the real Mac helper.
 """
 import argparse
-import json
 import os
 import socket
 import struct
@@ -60,7 +59,7 @@ def session_config(width: int, height: int, fps: int, bitrate: int) -> bytes:
 
 
 def video_frame(frame_id: int, timestamp_us: int, payload: bytes, keyframe: bool) -> bytes:
-    header = struct.pack(">BBII", 1, 1 if keyframe else 0, frame_id, timestamp_us) + struct.pack(">I", 0)
+    header = struct.pack(">BBIQI", 1, 1 if keyframe else 0, frame_id, timestamp_us, 0)
     return frame_bytes(3, header + payload)
 
 
@@ -79,10 +78,6 @@ def main() -> int:
     if not frames:
         print("no frames parsed from", args.file)
         return 1
-
-    with open(os.path.join(ROOT, "protocol", "vectors.json"), "r", encoding="utf-8") as handle:
-        hello_hex = json.load(handle)["hello"]["hex"]
-    _ = hello_hex  # client sends it; server only validates frame length below
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

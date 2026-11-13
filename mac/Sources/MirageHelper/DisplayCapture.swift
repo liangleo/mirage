@@ -22,12 +22,20 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     private var completeFrames = 0
     private var dirtyFrames = 0
     private var emittedFrames = 0
+    private let forceLock = NSLock()
+    private var forceNextFrame = false
 
     public init(displayID: CGDirectDisplayID, fps: Int, size: CaptureSize? = nil, onFrame: @escaping FrameHandler) {
         self.displayID = displayID
         self.fps = fps
         self.targetSize = size
         self.onFrame = onFrame
+    }
+
+    public func requestFrame() {
+        forceLock.lock()
+        forceNextFrame = true
+        forceLock.unlock()
     }
 
     public func start() async throws {
@@ -77,7 +85,8 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             return
         }
         completeFrames += 1
-        guard hasNonEmptyDirtyRect(attachments) else { return }
+        let forced = takeForcedFrame()
+        guard forced || hasNonEmptyDirtyRect(attachments) else { return }
         dirtyFrames += 1
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         emittedFrames += 1
@@ -86,6 +95,14 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             fflush(stdout)
         }
         onFrame(pixelBuffer, monotonicMicros())
+    }
+
+    private func takeForcedFrame() -> Bool {
+        forceLock.lock()
+        defer { forceLock.unlock() }
+        let forced = forceNextFrame
+        forceNextFrame = false
+        return forced
     }
 
     private func hasNonEmptyDirtyRect(_ attachments: [SCStreamFrameInfo: Any]) -> Bool {

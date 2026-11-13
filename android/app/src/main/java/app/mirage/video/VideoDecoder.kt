@@ -9,22 +9,22 @@ import android.view.Surface
 import app.mirage.net.SessionConfig
 import app.mirage.net.VideoFrame
 import java.nio.ByteBuffer
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.TimeUnit
 
 class VideoDecoder(
     private val surface: Surface,
     private val config: SessionConfig,
-    private val onError: (String) -> Unit
+    private val onError: (String) -> Unit,
+    private val onNeedKeyframe: () -> Unit = {}
 ) {
     private val thread = HandlerThread("mirage-decoder").apply { start() }
     private val handler = Handler(thread.looper)
-    private val queue = LinkedBlockingQueue<VideoFrame>()
+    private val queue = DecodeQueue(capacity = 4)
 
     @Volatile
     private var running = true
 
     private var codec: MediaCodec? = null
+    private var initFailures = 0
 
     fun start() {
         handler.post { loop() }
@@ -55,7 +55,7 @@ class VideoDecoder(
     private fun loop() {
         var firstKeyframe: VideoFrame? = null
         while (running && firstKeyframe == null) {
-            val frame = queue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+            val frame = queue.poll(100) ?: continue
             if (frame.header.flags and 1 != 0) {
                 firstKeyframe = frame
             }
@@ -66,12 +66,18 @@ class VideoDecoder(
             configureDecoder(firstKeyframe.annexB)
         } catch (error: Exception) {
             onError("decoder init failed: ${error.message}")
+            queue.clear()
+            if (initFailures < MAX_INIT_FAILURES) {
+                initFailures++
+                handler.postDelayed({ loop() }, 500)
+            }
             return
         }
+        initFailures = 0
 
         var pending: VideoFrame? = firstKeyframe
         while (running) {
-            val frame = pending ?: queue.poll(50, TimeUnit.MILLISECONDS)
+            val frame = pending ?: queue.poll(50)
             if (frame == null) {
                 drainOutput()
                 continue
@@ -97,9 +103,27 @@ class VideoDecoder(
                 pending = null
             } catch (error: Exception) {
                 onError("decode failed: ${error.message}")
-                running = false
+                restartDecoder()
+                return
             }
             drainOutput()
+        }
+    }
+
+    private fun restartDecoder() {
+        try {
+            codec?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            codec?.release()
+        } catch (_: Exception) {
+        }
+        codec = null
+        queue.clear()
+        onNeedKeyframe()
+        if (running) {
+            handler.post { loop() }
         }
     }
 
@@ -125,6 +149,10 @@ class VideoDecoder(
             format.setInteger(MediaFormat.KEY_OPERATING_RATE, config.fps)
         } catch (_: Exception) {
         }
+        try {
+            format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024)
+        } catch (_: Exception) {
+        }
 
         val (sps, pps) = AnnexB.parameterSets(firstKeyframe)
         if (sps != null) format.setByteBuffer("csd-0", ByteBuffer.wrap(sps))
@@ -148,5 +176,9 @@ class VideoDecoder(
                 else -> return
             }
         }
+    }
+
+    companion object {
+        private const val MAX_INIT_FAILURES = 3
     }
 }

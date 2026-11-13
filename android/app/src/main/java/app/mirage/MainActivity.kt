@@ -132,11 +132,15 @@ class MainActivity : ComponentActivity() {
             videoWidth = currentConfig.width
             videoHeight = currentConfig.height
         }
-        val newDecoder = VideoDecoder(currentSurface, currentConfig) { message ->
-            mainHandler.post { status = message }
-        }
+        val newDecoder = VideoDecoder(
+            surface = currentSurface,
+            config = currentConfig,
+            onError = { message -> mainHandler.post { status = message } },
+            onNeedKeyframe = { client?.requestKeyframe() }
+        )
         decoder = newDecoder
         newDecoder.start()
+        client?.requestKeyframe()
     }
 
     private fun buildHello(): Hello {

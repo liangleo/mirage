@@ -18,6 +18,7 @@ class MirageClient(
     }
 
     private val thread = Thread({ run() }, "mirage-client")
+    private val liveness = Liveness(timeoutMs = 3_000)
 
     @Volatile
     private var running = true
@@ -25,8 +26,22 @@ class MirageClient(
     @Volatile
     private var socket: Socket? = null
 
+    @Volatile
+    private var output: OutputStream? = null
+
     fun connect() {
         thread.start()
+    }
+
+    fun requestKeyframe() {
+        val stream = output ?: return
+        try {
+            synchronized(stream) {
+                stream.write(Messages.encodeFrame(MessageType.CTRL.id, byteArrayOf(1)))
+                stream.flush()
+            }
+        } catch (_: Exception) {
+        }
     }
 
     fun close() {
@@ -46,20 +61,21 @@ class MirageClient(
             socket = connection
 
             output = connection.getOutputStream()
+            this.output = output
             output.write(Messages.encodeHello(hello))
             output.flush()
+            liveness.noteActivity(System.currentTimeMillis())
 
             val input = connection.getInputStream()
             val decoder = FrameDecoder()
             val buffer = ByteArray(64 * 1024)
-            var lastFrameAt = System.currentTimeMillis()
 
             while (running) {
                 connection.soTimeout = 1_000
                 val read = try {
                     input.read(buffer)
                 } catch (_: SocketTimeoutException) {
-                    if (System.currentTimeMillis() - lastFrameAt > 3_000) {
+                    if (liveness.timedOut(System.currentTimeMillis())) {
                         listener.onClosed("连接无响应")
                         return
                     }
@@ -70,18 +86,20 @@ class MirageClient(
                 decoder.append(buffer.copyOf(read))
                 while (true) {
                     val frame = decoder.next() ?: break
+                    liveness.noteActivity(System.currentTimeMillis())
                     when (frame.type) {
                         MessageType.SESSION_CONFIG.id ->
                             listener.onConfig(Messages.decodeSessionConfig(frame.payload))
 
                         MessageType.VIDEO.id -> {
                             listener.onVideo(Messages.decodeVideo(frame.payload))
-                            lastFrameAt = System.currentTimeMillis()
                         }
 
                         MessageType.PING.id -> {
-                            output.write(Messages.encodePing(Messages.decodePing(frame.payload)))
-                            output.flush()
+                            synchronized(output) {
+                                output.write(Messages.encodePing(Messages.decodePing(frame.payload)))
+                                output.flush()
+                            }
                         }
 
                         MessageType.BYE.id -> {
@@ -101,6 +119,7 @@ class MirageClient(
                 output?.close()
             } catch (_: Exception) {
             }
+            this.output = null
             try {
                 socket?.close()
             } catch (_: Exception) {
