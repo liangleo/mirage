@@ -47,6 +47,12 @@ public final class FrameSender: @unchecked Sendable {
         return true
     }
 
+    public func awaitKeyframe() {
+        lock.lock()
+        waiting = true
+        lock.unlock()
+    }
+
     public func completeOne() {
         lock.lock()
         if count > 0 {

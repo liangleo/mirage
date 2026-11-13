@@ -88,6 +88,8 @@ public final class MirageServer: @unchecked Sendable {
         }
         connection = newConnection
         decoder = FrameDecoder()
+        sender.awaitKeyframe()
+        onKeyframeRequest?()
 
         newConnection.stateUpdateHandler = { [weak self, weak newConnection] state in
             guard let self, let newConnection else { return }

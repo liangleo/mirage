@@ -58,4 +58,15 @@ final class FrameSenderTests: XCTestCase {
         sender.completeOne()
         XCTAssertEqual(sender.queuedCount, 0)
     }
+
+    func testAwaitKeyframeDropsNonKeyframesUntilKeyframeArrives() {
+        let sender = FrameSender()
+        sender.awaitKeyframe()
+
+        XCTAssertFalse(sender.enqueue(frame(keyframe: false)))
+        XCTAssertTrue(sender.isWaitingForKeyframe)
+
+        XCTAssertTrue(sender.enqueue(frame(keyframe: true)))
+        XCTAssertFalse(sender.isWaitingForKeyframe)
+    }
 }

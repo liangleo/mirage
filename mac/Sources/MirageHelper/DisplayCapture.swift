@@ -14,12 +14,19 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
     private let displayID: CGDirectDisplayID
     private let fps: Int
+    private let targetSize: CaptureSize?
     private let onFrame: FrameHandler
     private var stream: SCStream?
+    private let debug = ProcessInfo.processInfo.environment["MIRAGE_DEBUG"] == "1"
+    private var rawCallbacks = 0
+    private var completeFrames = 0
+    private var dirtyFrames = 0
+    private var emittedFrames = 0
 
-    public init(displayID: CGDirectDisplayID, fps: Int, onFrame: @escaping FrameHandler) {
+    public init(displayID: CGDirectDisplayID, fps: Int, size: CaptureSize? = nil, onFrame: @escaping FrameHandler) {
         self.displayID = displayID
         self.fps = fps
+        self.targetSize = size
         self.onFrame = onFrame
     }
 
@@ -28,7 +35,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw CaptureError.displayNotFound(displayID)
         }
-        guard let size = captureSize(for: displayID) else {
+        guard let size = targetSize ?? captureSize(for: displayID) else {
             throw CaptureError.invalidDisplayMode(displayID)
         }
 
@@ -56,6 +63,11 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
     public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, sampleBuffer.isValid else { return }
+        rawCallbacks += 1
+        if debug && rawCallbacks % 60 == 0 {
+            print("capture_callbacks=\(rawCallbacks)")
+            fflush(stdout)
+        }
         guard let list = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let attachments = list.first else { return }
 
@@ -64,8 +76,15 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
            status != .complete {
             return
         }
+        completeFrames += 1
         guard hasNonEmptyDirtyRect(attachments) else { return }
+        dirtyFrames += 1
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        emittedFrames += 1
+        if debug && rawCallbacks % 120 == 0 {
+            print("capture raw=\(rawCallbacks) complete=\(completeFrames) dirty=\(dirtyFrames) emitted=\(emittedFrames)")
+            fflush(stdout)
+        }
         onFrame(pixelBuffer, monotonicMicros())
     }
 

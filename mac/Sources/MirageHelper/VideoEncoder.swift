@@ -25,6 +25,7 @@ public final class VideoEncoder: @unchecked Sendable {
     private var session: VTCompressionSession?
     private var frameID: UInt32 = 0
     private var parameterSets: [Data] = []
+    private let debug = ProcessInfo.processInfo.environment["MIRAGE_DEBUG"] == "1"
 
     public init(width: Int, height: Int, fps: Int, bitrate: Int) throws {
         var session: VTCompressionSession?
@@ -121,6 +122,10 @@ public final class VideoEncoder: @unchecked Sendable {
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let micros = UInt64(max(0, CMTimeConvertScale(pts, timescale: 1_000_000, method: .roundHalfAwayFromZero).value))
         frameID &+= 1
+        if debug && frameID % 60 == 0 {
+            print("encoded_frames=\(frameID) keyframe=\(isKeyframe)")
+            fflush(stdout)
+        }
 
         let header = VideoHeader(
             codec: 1,

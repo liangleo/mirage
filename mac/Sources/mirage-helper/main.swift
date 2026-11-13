@@ -8,6 +8,11 @@ import MirageHelper
 
 let arguments = CommandLine.arguments
 
+func argumentValue(_ flag: String) -> String? {
+    guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
+    return arguments[index + 1]
+}
+
 if arguments.contains("--list-displays") {
     var count: UInt32 = 0
     CGGetActiveDisplayList(0, nil, &count)
@@ -45,10 +50,14 @@ if arguments.contains("--list-displays") {
 } else if arguments.contains("--serve-selftest") {
     let config = SessionConfig(width: 1280, height: 800, fps: 60, codec: 1, bitrate: 20_000_000, rotation: 0)
     let server = MirageServer(port: 7777, config: config)
-    server.onLog = { print($0) }
+    server.onLog = { message in
+        print(message)
+        fflush(stdout)
+    }
     do {
         try server.start()
         print("listening=127.0.0.1:7777")
+        fflush(stdout)
     } catch {
         print("server_error=\(error)")
         exit(1)
@@ -56,7 +65,45 @@ if arguments.contains("--list-displays") {
     RunLoop.current.run(until: Date(timeIntervalSinceNow: 10))
     server.stop()
 } else {
-    print("usage: mirage-helper --list-displays | --encode-selftest")
+    let displayID = argumentValue("--display").flatMap { UInt32($0) } ?? CGMainDisplayID()
+    let port = argumentValue("--port").flatMap { UInt16($0) } ?? 7777
+    let fps = argumentValue("--fps").flatMap { Int($0) } ?? 60
+    let bitrate = argumentValue("--bitrate").flatMap { Int($0) } ?? 20_000_000
+
+    let app = HelperApp(displayID: displayID, port: port, fps: fps, bitrate: bitrate)
+    let box = ErrorBox()
+    let startSemaphore = DispatchSemaphore(value: 0)
+    Task.detached {
+        do {
+            try await app.run()
+        } catch {
+            box.set(error)
+        }
+        startSemaphore.signal()
+    }
+    startSemaphore.wait()
+    if let error = box.get() {
+        print("helper_error=\(error)")
+        exit(1)
+    }
+    RunLoop.current.run()
+}
+
+final class ErrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var error: Error?
+
+    func set(_ error: Error) {
+        lock.lock()
+        self.error = error
+        lock.unlock()
+    }
+
+    func get() -> Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return error
+    }
 }
 
 final class FrameCounter: @unchecked Sendable {

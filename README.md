@@ -17,10 +17,17 @@
 cd mac
 swift test
 swift run mirage-helper --list-displays
-swift run mirage-helper
+swift run mirage-helper --display 1 --port 7777 --fps 60 --bitrate 20000000
 ```
 
+默认捕获主显示器；超过 3840×2160 的屏幕会等比缩到该上限（硬件 H.264 编码限制）。
 首次捕获需要「屏幕录制」授权，授权对象是运行命令的终端 App。
+
+验证推流（另开终端，窗口保持有画面变化）：
+
+```bash
+python3 tools/mock_client.py
+```
 
 ## Android
 
