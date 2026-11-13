@@ -16,6 +16,6 @@ let package = Package(
             dependencies: ["MirageHelper", "MirageCore"],
             path: "Sources/mirage-helper"
         ),
-        .testTarget(name: "MirageCoreTests", dependencies: ["MirageCore"]),
+        .testTarget(name: "MirageCoreTests", dependencies: ["MirageCore", "MirageHelper"]),
     ]
 )
