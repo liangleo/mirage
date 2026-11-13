@@ -1,0 +1,8 @@
+.DS_Store
+mac/.build/
+mac/.swiftpm/
+android/.gradle/
+android/local.properties
+android/app/build/
+*.xcuserstate
+.superpowers/

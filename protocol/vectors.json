@@ -1,0 +1,30 @@
+{
+  "hello": {
+    "hex": "0000002701010001000102030405060708090a0b0c0d0e0f0a00064000f000f03c010000064d6972616765",
+    "fields": {
+      "protoVersion": 1,
+      "clientVersion": 1,
+      "deviceID": "000102030405060708090a0b0c0d0e0f",
+      "screenWidth": 2560,
+      "screenHeight": 1600,
+      "xdpi": 240,
+      "ydpi": 240,
+      "maxFPS": 60,
+      "codecs": 1,
+      "features": 0,
+      "rotation": 0,
+      "name": "Mirage"
+    }
+  },
+  "video": {
+    "headerHex": "0301010000000100000000000003e800000000",
+    "payloadHex": "deadbeef",
+    "fields": {
+      "codec": 1,
+      "flags": 1,
+      "frameID": 1,
+      "captureTimestampMicros": 1000,
+      "reserved": 0
+    }
+  }
+}
