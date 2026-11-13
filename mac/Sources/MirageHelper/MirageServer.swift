@@ -12,6 +12,7 @@ public final class MirageServer: @unchecked Sendable {
 
     private let port: UInt16
     private let session: Session
+    private let sender = FrameSender()
     private let queue = DispatchQueue(label: "app.mirage.server")
     private var listener: NWListener?
     private var connection: NWConnection?
@@ -49,11 +50,22 @@ public final class MirageServer: @unchecked Sendable {
         keepalive = timer
     }
 
-    public func broadcast(_ frame: Frame) {
+    public func broadcast(_ encoded: EncodedFrame) {
+        let frame = makeVideoFrame(encoded.header, annexB: encoded.data)
         queue.async { [weak self] in
             guard let self, let connection = self.connection else { return }
+
+            let wasWaiting = self.sender.isWaitingForKeyframe
+            guard self.sender.enqueue(encoded) else {
+                if !wasWaiting && self.sender.isWaitingForKeyframe {
+                    self.onKeyframeRequest?()
+                }
+                return
+            }
             self.session.noteOutbound(nowMicros: monotonicMicros())
-            self.send(frame, on: connection)
+            self.send(frame, on: connection) { [weak self] in
+                self?.sender.completeOne()
+            }
         }
     }
 
@@ -148,7 +160,7 @@ public final class MirageServer: @unchecked Sendable {
         }
     }
 
-    private func send(_ frame: Frame, on connection: NWConnection) {
+    private func send(_ frame: Frame, on connection: NWConnection, completion: (() -> Void)? = nil) {
         connection.send(
             content: encodeFrame(frame),
             contentContext: .defaultMessage,
@@ -157,6 +169,7 @@ public final class MirageServer: @unchecked Sendable {
                 if let error {
                     self?.onLog?("send error: \(error)")
                 }
+                completion?()
             }
         )
     }

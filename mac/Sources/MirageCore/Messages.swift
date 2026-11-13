@@ -146,7 +146,7 @@ public func decodeSessionConfig(_ payload: Data) throws -> SessionConfig {
     )
 }
 
-public func encodeVideo(_ header: VideoHeader, annexB: Data) -> Data {
+public func makeVideoFrame(_ header: VideoHeader, annexB: Data) -> Frame {
     var payload = Data(capacity: 18 + annexB.count)
     payload.append(header.codec)
     payload.append(header.flags)
@@ -154,7 +154,11 @@ public func encodeVideo(_ header: VideoHeader, annexB: Data) -> Data {
     payload.appendUInt64BE(header.captureTimestampMicros)
     payload.appendUInt32BE(header.reserved)
     payload.append(annexB)
-    return encodeFrame(Frame(type: MessageType.video.rawValue, payload: payload))
+    return Frame(type: MessageType.video.rawValue, payload: payload)
+}
+
+public func encodeVideo(_ header: VideoHeader, annexB: Data) -> Data {
+    encodeFrame(makeVideoFrame(header, annexB: annexB))
 }
 
 public func decodeVideo(_ payload: Data) throws -> (VideoHeader, Data) {
