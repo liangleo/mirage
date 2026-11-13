@@ -42,6 +42,19 @@ if arguments.contains("--list-displays") {
         print("encoder_error=\(error)")
         exit(1)
     }
+} else if arguments.contains("--serve-selftest") {
+    let config = SessionConfig(width: 1280, height: 800, fps: 60, codec: 1, bitrate: 20_000_000, rotation: 0)
+    let server = MirageServer(port: 7777, config: config)
+    server.onLog = { print($0) }
+    do {
+        try server.start()
+        print("listening=127.0.0.1:7777")
+    } catch {
+        print("server_error=\(error)")
+        exit(1)
+    }
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 10))
+    server.stop()
 } else {
     print("usage: mirage-helper --list-displays | --encode-selftest")
 }
