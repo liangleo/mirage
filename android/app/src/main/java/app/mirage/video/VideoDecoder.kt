@@ -1,6 +1,7 @@
 package app.mirage.video
 
 import android.media.MediaCodec
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Handler
@@ -138,6 +139,18 @@ class VideoDecoder(
     }
 
     private fun configureDecoder(firstKeyframe: ByteArray) {
+        val (sps, pps) = AnnexB.parameterSets(firstKeyframe)
+        Log.i("Mirage", "configure ${config.width}x${config.height} sps=${sps?.size ?: -1} pps=${pps?.size ?: -1}")
+
+        try {
+            startDecoder(buildFormat(sps, pps))
+        } catch (firstError: Exception) {
+            Log.w("Mirage", "configure with csd failed: ${firstError.message}; retrying in-band")
+            startDecoder(buildFormat(null, null))
+        }
+    }
+
+    private fun buildFormat(sps: ByteArray?, pps: ByteArray?): MediaFormat {
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_AVC,
             config.width,
@@ -164,15 +177,39 @@ class VideoDecoder(
         } catch (_: Exception) {
         }
 
-        val (sps, pps) = AnnexB.parameterSets(firstKeyframe)
-        Log.i("Mirage", "configure ${config.width}x${config.height} sps=${sps?.size ?: -1} pps=${pps?.size ?: -1}")
         if (sps != null) format.setByteBuffer("csd-0", ByteBuffer.wrap(sps))
         if (pps != null) format.setByteBuffer("csd-1", ByteBuffer.wrap(pps))
+        return format
+    }
 
-        val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        decoder.configure(format, surface, null, 0)
-        decoder.start()
+    private fun startDecoder(format: MediaFormat) {
+        val decoder = createDecoder()
+        try {
+            decoder.configure(format, surface, null, 0)
+            decoder.start()
+        } catch (error: Exception) {
+            try {
+                decoder.release()
+            } catch (_: Exception) {
+            }
+            throw error
+        }
         codec = decoder
+    }
+
+    private fun createDecoder(): MediaCodec {
+        return try {
+            MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        } catch (error: Exception) {
+            val name = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+                .firstOrNull { info ->
+                    !info.isEncoder && info.supportedTypes.any {
+                        it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true)
+                    }
+                }
+                ?.name
+            if (name != null) MediaCodec.createByCodecName(name) else throw error
+        }
     }
 
     private fun drainOutput() {

@@ -19,6 +19,15 @@ make clean     # 清理构建产物
 
 `make help` 查看全部命令；`INSTALL_DIR=~/Applications make install` 可改安装位置。
 
+## 版本要求
+
+- **macOS**：14+，仅 Apple Silicon；Xcode 27 / Swift 6。
+- **Android**：**8.0（API 26）及以上**；compileSdk / targetSdk 36。App 没有 native 库，arm64 / armeabi-v7a / x86_64 设备或模拟器都可运行。
+- **构建 JDK**：**17（推荐）或 21**；AGP 8.13.1 不支持 Java 25。Gradle 8.13、Kotlin 2.2.0。
+- 兼容处理：`KEY_LOW_LATENCY` 仅 API 30+、`KEY_PRIORITY` 仅 API 28+，低版本自动跳过；解码器 `csd-0/csd-1` 配置失败时回退为 in-band 参数集，并按 `MediaCodecList` 选择可用的 H.264 解码器。
+- Android 8/9 没有低延迟解码提示，延迟可能偏高；R 及以上可用性最好。
+- 系统同一时间只允许一块 Mirage 虚拟显示器：测试或启动新 helper 前，先退出正在运行的 Mirage.app，否则 extend 会创建失败并回退镜像。
+
 ## 结构
 
 - `protocol/`：帧格式、消息定义与跨语言测试向量

@@ -32,7 +32,15 @@ help:
 init:
 	@command -v swift >/dev/null || { echo "缺少 Swift/Xcode 命令行工具"; exit 1; }
 	@command -v ffmpeg >/dev/null || echo "提示: 未找到 ffmpeg（仅生成测试码流时需要）"
-	@if [ -z "$(GRADLE_JAVA_HOME)" ]; then echo "未找到 JDK 17/21，请安装并设置 JAVA_HOME"; else echo "Gradle JDK: $(GRADLE_JAVA_HOME)"; fi
+	@if [ -n "$(GRADLE_JAVA_HOME)" ]; then \
+		V=$$("$(GRADLE_JAVA_HOME)/bin/java" -version 2>&1 | awk -F'"' '/version/ {print $$2}' | cut -d. -f1); \
+		echo "Gradle JDK: $(GRADLE_JAVA_HOME) (Java $$V)"; \
+		if [ -n "$$V" ] && { [ "$$V" -lt 17 ] || [ "$$V" -ge 25 ]; }; then \
+			echo "错误: Gradle/AGP 需要 Java 17-24（推荐 17），当前 $$V"; exit 1; \
+		fi; \
+	else \
+		echo "未找到 JDK 17/21，请安装并设置 JAVA_HOME"; \
+	fi
 	@if [ ! -f $(ANDROID)/local.properties ] && [ -n "$(ANDROID_HOME)" ]; then \
 		echo "sdk.dir=$(ANDROID_HOME)" > $(ANDROID)/local.properties; \
 		echo "已写入 android/local.properties"; \

@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.DisplayMetrics
 import android.view.Surface
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -169,10 +170,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildHello(): Hello {
-        val metrics = resources.displayMetrics
         @Suppress("DEPRECATION")
-        val display = windowManager.defaultDisplay
-        val rotation = when (display?.rotation ?: Surface.ROTATION_0) {
+        val currentDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display ?: windowManager.defaultDisplay
+        } else {
+            windowManager.defaultDisplay
+        }
+
+        val metrics = DisplayMetrics()
+        if (currentDisplay != null) {
+            currentDisplay.getRealMetrics(metrics)
+        } else {
+            @Suppress("DEPRECATION")
+            metrics.setTo(resources.displayMetrics)
+        }
+
+        val rotation = when (currentDisplay?.rotation ?: Surface.ROTATION_0) {
             Surface.ROTATION_90 -> 1
             Surface.ROTATION_180 -> 2
             Surface.ROTATION_270 -> 3
@@ -186,7 +199,7 @@ class MainActivity : ComponentActivity() {
             screenHeight = metrics.heightPixels,
             xdpi = metrics.xdpi.toInt(),
             ydpi = metrics.ydpi.toInt(),
-            maxFPS = (display?.refreshRate ?: 60f).toInt(),
+            maxFPS = (currentDisplay?.refreshRate ?: 60f).toInt(),
             codecs = 1,
             features = 0,
             rotation = rotation,
