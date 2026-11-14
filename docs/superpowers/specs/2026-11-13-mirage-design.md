@@ -1,6 +1,6 @@
 # Mirage 设计文档
 
-版本：v1.0（定稿，2026-11-13；2026-11-14 完成 M0–M2 真机验收，实现现状见 §16）
+版本：v1.0（定稿，2026-11-13；2026-11-14 完成 M0–M2 真机验收并落地 M3 AOA 基础链路，实现现状见 §16）
 日期：2026-11-13
 定位：把 Android 平板/手机变成 Mac 的扩展屏或镜像屏。
 
@@ -294,7 +294,7 @@ count × 32 字节：
 
 ### 6.6 菜单栏 App 与权限引导
 
-实现现状（M2）：SwiftUI 菜单栏 App 默认只在状态栏运行，主界面为单实例窗口；菜单栏保留启动/停止服务、模式、分辨率、帧率、打开主界面等快捷项。主窗口提供启动/停止服务、启动 App 后自动启动服务、模式/分辨率/帧率切换，以及带时间戳和自动滚动的内嵌日志。App 会识别并接管已在运行的 helper，停止时结束 helper 进程。日志默认写入 `~/Library/Logs/Mirage/helper.log`。
+实现现状（M2/M3）：SwiftUI 菜单栏 App 默认只在状态栏运行，主界面为单实例窗口；菜单栏保留启动/停止服务、USB 连接、模式、分辨率、帧率、打开主界面等快捷项。主窗口提供启动/停止服务、启动 App 后自动启动服务、USB 免调试连接（AOA）、模式/分辨率/帧率切换，以及带时间戳和自动滚动的内嵌日志。App 会识别并接管已在运行的 helper，停止时结束 helper 与 AOA 桥接进程。日志默认写入 `~/Library/Logs/Mirage/helper.log`。
 
 目标形态（后续里程碑）：设备列表、码率预设、开机自启（`SMAppService`）、Helper 常驻（LaunchAgent）与 USB 热插拔自动拉起尚未实现。
 
@@ -309,7 +309,8 @@ count × 32 字节：
 
 ### 7.1 连接与发现
 
-- 有线：优先 AOA（见 8.1）；开发期用 `adb reverse`。
+- 有线：优先 AOA（见 8.1）；开发期用 `adb reverse`。M3 实现会优先检测 `UsbManager.accessoryList` 中的 Mirage accessory；有则请求授权并走 USB，否则回退 TCP。
+- USB accessory 通过 manifest 的 `USB_ACCESSORY_ATTACHED` intent-filter 自动拉起（`launchMode=singleTask`，`onNewIntent` 处理已运行实例）；activity 使用 `openAccessory` 的 fd，读写与 TCP 共用同一协议帧解析。
 - Wi-Fi：`NsdManager` 发现 `_mirage._tcp`（API 34+ 用 `registerServiceInfoCallback`，旧版本用 `resolveService`），或扫二维码直连；mDNS 失败时回退手动地址。
 - 扫码库用 ZXing（`com.journeyapps:zxing-android-embedded`，仅需 CAMERA 权限）；不用 ML Kit——它依赖 GMS，鸿蒙或无 GMS 设备不可用。
 - 首页：最近设备、手动地址输入、二维码扫描、连接状态；记住上次成功地址。
@@ -361,7 +362,8 @@ count × 32 字节：
 - macOS 侧：libusb 打开设备为独占（`USBDeviceOpenSeize`），Android File Transfer / OpenMTP / adb 占用时会返回 `kIOReturnExclusiveAccess`，UI 需提示关闭这些工具；不要用 `auto_detach_kernel_driver`（需要额外权限且会触发重枚举）。非沙盒 Developer ID 无需 USB entitlement；沙盒才需 `com.apple.security.device.usb`。
 - 打包：libusb dylib 的 install_name 指向 Homebrew 绝对路径，需改 `@rpath` 并重新签名（公证要求所有 Mach-O 已签）；或静态链接并履行 LGPL 可重链接义务。
 - 已知失败模式：个别 ROM 的 `GET_PROTOCOL` 失败；USB 3 口重枚举异常而 USB 2 正常；App 未安装/被强停时设备卡在 accessory 模式需拔插。
-- 复杂度估计 8–15 人天（host + Android + 打包 + 机型矩阵）。参考实现：9elements/aoakvm、rustscreen。
+
+实现现状（2026-11-14）：AOA 通过独立的 `mirage-aoa` 桥接进程实现：libusb 静态链接，负责 GET_PROTOCOL/SEND_STRING/START、bulk 端点读写，并把字节流转发到 helper 的 127.0.0.1:7777。helper 因自动分辨率 `execv` 重启时，桥接进程保持 accessory 打开、重连 TCP 并重放 HELLO。Android 端通过 `USB_ACCESSORY_ATTACHED` 自动拉起，复用同一协议帧；Mac 主界面/菜单提供「USB 免调试连接（AOA）」开关。首次连接需系统授权；停止桥接后通常需要拔插 USB 才能退出 accessory 模式。调试机型 vivo V2309A 实测 USB 路径 2800×1260@60 约 51 fps、decode 36 ms、e2e 45 ms、RTT 0 ms。自动热插拔检测与 LaunchAgent 常驻尚未实现。
 
 ### 8.2 adb reverse（开发期与兜底）
 
@@ -436,7 +438,7 @@ count × 32 字节：
 | M0 | 协议冻结（§5 + 测试向量）、Mac 捕获编码 CLI、`mock_mac.py` | 2–3 天 |
 | M1 | Android 解码显示 + adb reverse 通链，镜像模式跑通 | 2–3 天 |
 | M2 | CGVirtualDisplay 真扩展屏、分辨率/方向协商、画面适配 | 3–5 天 |
-| M3 | AOA 免调试 USB、自动拉起、菜单栏 App、屏幕录制权限引导 | 8–15 天 |
+| M3 | AOA 免调试 USB、自动拉起、菜单栏 App、屏幕录制权限引导 | 8–15 天 | 基础链路已实现（2026-11-14） |
 | M4 | Wi-Fi：mDNS、UDP、NACK、码率自适应、二维码配对、TLS | 6–9 天 |
 | M5 | 多机型矩阵、性能调优、打包公证、分发 | 3–5 天 |
 
@@ -513,24 +515,26 @@ v1.0 合计约 **24–40 人天（5–8 周）**。顺利情况下约 4 周可�
 
 ## 16. 实现与验收现状（2026-11-14）
 
-**已交付（M0–M2）：**
+**已交付（M0–M3 基础链路）：**
 
 - M0：协议 v1、共享测试向量、mock server/client、Mac 捕获/编码 CLI。
 - M1：Android 解码显示（SurfaceView）、逐帧统计、丢帧后关键帧恢复、自动重连；开发期使用 `adb reverse`。
 - M2：`CGVirtualDisplay` 扩展屏、设备旋转/分辨率自适应（helper 通过 `execv` 重建虚拟屏）、菜单栏 App 与独立主窗口、内嵌实时日志。
+- M3：AOA 免调试 USB 桥接（`tools/aoa_bridge.c` + 静态 libusb）、Android USB Accessory 自动拉起与授权、Mac「USB 免调试连接」开关；helper 重启后桥接自动重连。
 - Android 控制面板位于屏幕右侧，含设置、调试开关、断开；调试浮层显示 decode/e2e/rtt 延迟（ms）。
 
 **真机验收（vivo V2309A，Android 16，MediaTek）：**
 
-- 硬解 `c2.mtk.avc.decoder hardware=true`；2800×1260@60 动态画面实测 49 fps、decode 20 ms、e2e 29 ms、RTT 2 ms、drop 0；Mac 编码约 8–10 ms。
-- 验证通过：连接、断开/重连、横竖屏重建（1260×2800 / 2800×1260）、右侧面板、调试开关、屏幕常亮、helper 停止后自动恢复、Mac 状态栏常驻与单实例主窗口、日志时间戳与自动滚动。
+- 硬解 `c2.mtk.avc.decoder hardware=true`；2800×1260@60 动态画面 TCP 路径实测 49 fps、decode 20 ms、e2e 29 ms、RTT 2 ms、drop 0；USB AOA 路径约 51 fps、decode 36 ms、e2e 45 ms、RTT 0 ms；Mac 编码约 8–10 ms。
+- 验证通过：连接、断开/重连、横竖屏重建（1260×2800 / 2800×1260）、右侧面板、调试开关、屏幕常亮、helper 停止后自动恢复、AOA 切换与 helper 重启重连、Mac 状态栏常驻与单实例主窗口、日志时间戳与自动滚动。
 - 模拟器（软件解码）用于回归 UI 与恢复流程；真机用于性能与硬解验收。
 
 **与完整 v1.0 验收标准的差距：**
 
-- 仍使用 `adb reverse`，AOA 免调试 USB 未实现；TCP 明文 + 无 TLS；Wi-Fi/5GHz 路径未实现。
+- AOA 已可用，但还没有插入 USB 后的自动热插拔启动/LaunchAgent 常驻；`adb reverse` 仍保留为兜底。
+- TCP/AOA 均为明文，无 TLS；Wi-Fi/5GHz 路径未实现。
 - 未做 2 小时稳定性与内存增长测试；平板性能基准尚未单独验收。
-- 上述差距作为后续里程碑，不阻塞当前 M0–M2 显示链路验收。
+- 上述差距作为后续里程碑，不阻塞当前显示链路与 AOA 基础链路验收。
 
 ---
 

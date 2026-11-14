@@ -18,6 +18,19 @@ touch "$ROOT/build/.metadata_never_index"
 
 cp "$BIN/mirage-menu" "$APP/Contents/MacOS/Mirage"
 cp "$BIN/mirage-helper" "$APP/Contents/MacOS/mirage-helper"
+
+LIBUSB_PREFIX="$(brew --prefix libusb 2>/dev/null || true)"
+if [ -z "$LIBUSB_PREFIX" ] || [ ! -f "$LIBUSB_PREFIX/lib/libusb-1.0.a" ]; then
+  echo "缺少 Homebrew libusb；先执行 brew install libusb" >&2
+  exit 1
+fi
+cc -O2 \
+  -I"$LIBUSB_PREFIX/include/libusb-1.0" \
+  "$ROOT/tools/aoa_bridge.c" \
+  "$LIBUSB_PREFIX/lib/libusb-1.0.a" \
+  -framework IOKit -framework CoreFoundation -framework Security -pthread \
+  -o "$APP/Contents/MacOS/mirage-aoa"
+
 iconutil -c icns "$ROOT/build/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -56,10 +69,12 @@ PLIST
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 if [ -n "$SIGN_IDENTITY" ] && [ "$SIGN_IDENTITY" != "-" ]; then
   codesign --force --sign "$SIGN_IDENTITY" --identifier app.mirage.helper "$APP/Contents/MacOS/mirage-helper"
+  codesign --force --sign "$SIGN_IDENTITY" --identifier app.mirage.aoa "$APP/Contents/MacOS/mirage-aoa"
   codesign --force --sign "$SIGN_IDENTITY" "$APP"
   echo "signed with: $SIGN_IDENTITY"
 else
   codesign --force --sign - --identifier app.mirage.helper "$APP/Contents/MacOS/mirage-helper"
+  codesign --force --sign - --identifier app.mirage.aoa "$APP/Contents/MacOS/mirage-aoa"
   codesign --force --sign - "$APP"
   echo "ad-hoc signed (Screen Recording permission may be requested again after rebuild)"
 fi

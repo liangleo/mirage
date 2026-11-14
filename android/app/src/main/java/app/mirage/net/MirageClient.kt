@@ -2,18 +2,15 @@ package app.mirage.net
 
 import android.os.SystemClock
 import java.io.OutputStream
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class MirageClient(
-    private val host: String,
-    private val port: Int,
     private val hello: Hello,
     private val stats: StreamStats,
-    private val listener: Listener
+    private val listener: Listener,
+    private val openConnection: () -> StreamConnection
 ) {
     interface Listener {
         fun onConfig(config: SessionConfig)
@@ -28,7 +25,7 @@ class MirageClient(
     private var running = true
 
     @Volatile
-    private var socket: Socket? = null
+    private var connection: StreamConnection? = null
 
     @Volatile
     private var output: OutputStream? = null
@@ -56,7 +53,7 @@ class MirageClient(
     fun close() {
         running = false
         try {
-            socket?.close()
+            connection?.close()
         } catch (_: Exception) {
         }
     }
@@ -111,26 +108,25 @@ class MirageClient(
     }
 
     private fun run() {
-        var output: OutputStream? = null
+        var active: StreamConnection? = null
         try {
-            val connection = Socket()
-            connection.connect(InetSocketAddress(host, port), 5_000)
-            connection.tcpNoDelay = true
-            socket = connection
+            val connection = openConnection()
+            active = connection
+            this.connection = connection
 
-            output = connection.getOutputStream()
+            val output = connection.output
             this.output = output
             output.write(Messages.encodeHello(hello))
             output.flush()
             liveness.noteActivity(System.currentTimeMillis())
 
-            val input = connection.getInputStream()
+            val input = connection.input
             val decoder = FrameDecoder()
             val buffer = ByteArray(64 * 1024)
 
             while (running) {
                 maybeSendPing(output)
-                connection.soTimeout = 1_000
+                connection.prepareRead()
                 val read = try {
                     input.read(buffer)
                 } catch (_: SocketTimeoutException) {
@@ -181,15 +177,11 @@ class MirageClient(
             }
         } finally {
             try {
-                output?.close()
+                active?.close()
             } catch (_: Exception) {
             }
             this.output = null
-            try {
-                socket?.close()
-            } catch (_: Exception) {
-            }
-            socket = null
+            connection = null
         }
     }
 }

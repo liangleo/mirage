@@ -1,13 +1,20 @@
 package app.mirage
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.usb.UsbAccessory
+import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.app.PendingIntent
 import android.util.DisplayMetrics
 import android.view.Surface
 import android.view.WindowManager
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -62,7 +69,10 @@ import app.mirage.net.Hello
 import app.mirage.net.MirageClient
 import app.mirage.net.SessionConfig
 import app.mirage.net.StatsSnapshot
+import app.mirage.net.StreamConnection
 import app.mirage.net.StreamStats
+import app.mirage.net.TcpStreamConnection
+import app.mirage.net.UsbStreamConnection
 import app.mirage.net.VideoFrame
 import app.mirage.ui.AspectSurfaceView
 import app.mirage.ui.VideoView
@@ -90,6 +100,51 @@ class MainActivity : ComponentActivity() {
     private var surfaceView: AspectSurfaceView? = null
     private var client: MirageClient? = null
     private val stats = StreamStats()
+
+    private lateinit var usbManager: UsbManager
+    private var pendingAccessory: UsbAccessory? = null
+    private var usingUsb = false
+
+    private val usbPermissionAction = "app.mirage.USB_PERMISSION"
+    private val usbReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                usbPermissionAction -> {
+                    val granted = intent.getBooleanExtra(
+                        UsbManager.EXTRA_PERMISSION_GRANTED,
+                        false
+                    )
+                    val accessory = if (Build.VERSION.SDK_INT >= 33) {
+                        intent.getParcelableExtra(
+                            UsbManager.EXTRA_ACCESSORY,
+                            UsbAccessory::class.java
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY)
+                    } ?: pendingAccessory
+                    pendingAccessory = null
+                    if (granted && accessory != null) {
+                        connect(
+                            lastHost ?: savedHost,
+                            lastPort.takeIf { it > 0 } ?: savedPort,
+                            isReconnect = true
+                        )
+                    } else {
+                        connecting = false
+                        status = "USB 权限被拒绝"
+                    }
+                }
+
+                UsbManager.ACTION_USB_ACCESSORY_DETACHED -> {
+                    if (usingUsb) {
+                        handleConnectionClosed("USB 已断开")
+                    }
+                    pendingAccessory = null
+                }
+            }
+        }
+    }
 
     private var savedHost = ""
     private var savedPort = 0
@@ -120,6 +175,17 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        usbManager = getSystemService(UsbManager::class.java)
+        ContextCompat.registerReceiver(
+            this,
+            usbReceiver,
+            IntentFilter().apply {
+                addAction(usbPermissionAction)
+                addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
         val preferences = getSharedPreferences("mirage", Context.MODE_PRIVATE)
         savedHost = preferences.getString("host", "") ?: ""
         savedPort = preferences.getInt("port", 0)
@@ -127,7 +193,8 @@ class MainActivity : ComponentActivity() {
         phoneWidth = metrics.widthPixels
         phoneHeight = metrics.heightPixels
         val configured = savedHost.isNotBlank() && savedPort > 0
-        if (!configured) {
+        val hasAccessory = findMirageAccessory() != null
+        if (!configured && !hasAccessory) {
             status = "请先设置 Mac 地址"
             showSettings = true
         }
@@ -272,11 +339,27 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        if (configured) {
+        if (configured || hasAccessory) {
             connect(savedHost, savedPort)
         }
 
         hideSystemBars()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
+            val accessory = intent.getAccessory()
+            if (accessory != null) {
+                pendingAccessory = accessory
+                connect(
+                    lastHost ?: savedHost,
+                    lastPort.takeIf { it > 0 } ?: savedPort,
+                    isReconnect = true
+                )
+            }
+        }
     }
 
     override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
@@ -327,6 +410,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(usbReceiver)
+        } catch (_: Exception) {
+        }
         disconnect()
         super.onDestroy()
     }
@@ -340,43 +427,93 @@ class MainActivity : ComponentActivity() {
             reconnectAttempts = 0
         }
         connecting = true
-        status = if (isReconnect) "重连中…（第 $reconnectAttempts 次）" else "连接中…"
 
         client?.close()
         client = null
 
-        val newClient = MirageClient(host, port, buildHello(), stats, object : MirageClient.Listener {
-            override fun onConfig(newConfig: SessionConfig) {
-                mainHandler.post {
-                    autoReconnectEnabled = true
-                    reconnectAttempts = 0
-                    connecting = false
-                    config = newConfig
-                    videoWidth = newConfig.width
-                    videoHeight = newConfig.height
-                    setKeepScreenOn(true)
-                    status = "已连接 ${newConfig.width}x${newConfig.height}@${newConfig.fps}"
-                    connected = true
-                    maybeStartDecoder()
-                }
-            }
+        val accessory = findMirageAccessory()
+        if (accessory != null && !usbManager.hasPermission(accessory)) {
+            pendingAccessory = accessory
+            status = "等待 USB 授权…"
+            requestUsbPermission(accessory)
+            return
+        }
 
-            override fun onVideo(frame: VideoFrame) {
-                val currentDecoder = decoder
-                if (currentDecoder != null) {
-                    currentDecoder.submit(frame)
-                } else if (frame.header.flags and 1 != 0) {
-                    pendingKeyframe = frame
-                }
-            }
+        if (accessory != null) {
+            status = if (isReconnect) "重连中…（USB）" else "连接中…（USB）"
+            startClient({ UsbStreamConnection(usbManager, accessory) }, usb = true)
+        } else {
+            status = if (isReconnect) "重连中…（第 $reconnectAttempts 次）" else "连接中…"
+            startClient({ TcpStreamConnection(host, port) }, usb = false)
+        }
+    }
 
-            override fun onClosed(reason: String) {
-                mainHandler.post { handleConnectionClosed(reason) }
-            }
-        })
+    private fun startClient(open: () -> StreamConnection, usb: Boolean) {
+        usingUsb = usb
+        val newClient = MirageClient(
+            buildHello(),
+            stats,
+            object : MirageClient.Listener {
+                override fun onConfig(newConfig: SessionConfig) {
+                    mainHandler.post {
+                        autoReconnectEnabled = true
+                        reconnectAttempts = 0
+                        connecting = false
+                        config = newConfig
+                        videoWidth = newConfig.width
+                        videoHeight = newConfig.height
+                        setKeepScreenOn(true)
+                        val transport = if (usingUsb) "USB " else ""
+                        status = "已连接 $transport${newConfig.width}x${newConfig.height}@${newConfig.fps}"
+                        connected = true
+                        maybeStartDecoder()
+                    }
+                }
+
+                override fun onVideo(frame: VideoFrame) {
+                    val currentDecoder = decoder
+                    if (currentDecoder != null) {
+                        currentDecoder.submit(frame)
+                    } else if (frame.header.flags and 1 != 0) {
+                        pendingKeyframe = frame
+                    }
+                }
+
+                override fun onClosed(reason: String) {
+                    mainHandler.post { handleConnectionClosed(reason) }
+                }
+            },
+            open
+        )
         client = newClient
         newClient.connect()
     }
+
+    private fun findMirageAccessory(): UsbAccessory? {
+        val accessories = usbManager.accessoryList ?: return null
+        return accessories.firstOrNull {
+            it.manufacturer == "Mirage" || it.model == "Mirage Display"
+        } ?: accessories.singleOrNull()
+    }
+
+    private fun requestUsbPermission(accessory: UsbAccessory) {
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_MUTABLE
+        } else {
+            0
+        }
+        val intent = Intent(usbPermissionAction).setPackage(packageName)
+        val pending = PendingIntent.getBroadcast(this, 0, intent, flags)
+        usbManager.requestPermission(accessory, pending)
+    }
+
+    private fun Intent.getAccessory(): UsbAccessory? =
+        if (Build.VERSION.SDK_INT >= 33) {
+            getParcelableExtra(UsbManager.EXTRA_ACCESSORY, UsbAccessory::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            getParcelableExtra(UsbManager.EXTRA_ACCESSORY)
+        }
 
     private fun handleConnectionClosed(reason: String) {
         client = null
@@ -413,7 +550,12 @@ class MainActivity : ComponentActivity() {
 
     private fun scheduleReconnect() {
         val host = lastHost ?: return
-        if (host.isBlank() || lastPort <= 0) return
+        if ((host.isBlank() || lastPort <= 0) && findMirageAccessory() == null) {
+            connecting = false
+            connected = false
+            status = "连接已断开"
+            return
+        }
 
         reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
         reconnectAttempts++

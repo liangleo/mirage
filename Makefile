@@ -15,12 +15,12 @@ INSTALL_DIR ?= /Applications
 SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | awk '/Apple Development/ && !/CSSMERR/ {print $$2; exit}')
 DEVICE ?= $(shell $(ADB) devices 2>/dev/null | awk 'NR>1 && $$2=="device" {print $$1; exit}')
 
-.PHONY: help init build build-mac build-android app test clean install install-mac install-apk connect run dev logs
+.PHONY: help init build build-mac build-android build-aoa app test clean install install-mac install-apk connect run dev logs
 
 help:
 	@echo "Mirage 常用命令:"
 	@echo "  make init          检查并初始化开发环境"
-	@echo "  make build         构建 Mac 端和 Android APK"
+	@echo "  make build         构建 Mac 端、AOA 桥接和 Android APK"
 	@echo "  make app           打包 build/Mirage.app"
 	@echo "  make test          运行 Mac 与 Android 单元测试"
 	@echo "  make install       安装 App 到 $(INSTALL_DIR)，并安装 APK 到设备"
@@ -33,6 +33,8 @@ help:
 init:
 	@command -v swift >/dev/null || { echo "缺少 Swift/Xcode 命令行工具"; exit 1; }
 	@command -v ffmpeg >/dev/null || echo "提示: 未找到 ffmpeg（仅生成测试码流时需要）"
+	@LIBUSB="$$(brew --prefix libusb 2>/dev/null)"; \
+	if [ -z "$$LIBUSB" ]; then echo "提示: AOA USB 需要 libusb，执行 brew install libusb"; fi
 	@if [ -n "$(GRADLE_JAVA_HOME)" ]; then \
 		V=$$("$(GRADLE_JAVA_HOME)/bin/java" -version 2>&1 | awk -F'"' '/version/ {print $$2}' | cut -d. -f1); \
 		echo "Gradle JDK: $(GRADLE_JAVA_HOME) (Java $$V)"; \
@@ -50,10 +52,19 @@ init:
 	@cd $(MAC) && swift build
 	@echo "初始化完成"
 
-build: build-mac build-android
+build: build-mac build-android build-aoa
 
 build-mac:
 	cd $(MAC) && swift build
+
+build-aoa:
+	@LIBUSB="$$(brew --prefix libusb 2>/dev/null)"; \
+	if [ -z "$$LIBUSB" ]; then echo "缺少 libusb：brew install libusb"; exit 1; fi; \
+	mkdir -p $(ROOT)/build; \
+	cc -O2 -I"$$LIBUSB/include/libusb-1.0" $(ROOT)/tools/aoa_bridge.c \
+		"$$LIBUSB/lib/libusb-1.0.a" \
+		-framework IOKit -framework CoreFoundation -framework Security -pthread \
+		-o $(ROOT)/build/aoa_bridge
 
 build-android:
 	cd $(ANDROID) && JAVA_HOME="$(GRADLE_JAVA_HOME)" ./gradlew :app:assembleDebug

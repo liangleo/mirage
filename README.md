@@ -19,9 +19,14 @@ make clean     # 清理构建产物
 
 `make help` 查看全部命令；`INSTALL_DIR=~/Applications make install` 可改安装位置。
 
+## 开发工具（Skills / MCP）
+
+Claude Code 使用的 MCP 与 Agent Skills 清单、前置条件、重装和触发规则见 [docs/agent-tooling.md](docs/agent-tooling.md)。
+
 ## 版本要求
 
 - **macOS**：14+，仅 Apple Silicon；Xcode 27 / Swift 6。
+- **USB 免调试连接（AOA）**：需要 Homebrew libusb（`brew install libusb`）；`make app` 会静态链接 libusb，运行时不需要额外 dylib。
 - **Android**：**8.0（API 26）及以上**；compileSdk / targetSdk 36。App 没有 native 库，arm64 / armeabi-v7a / x86_64 设备或模拟器都可运行。
 - **构建 JDK**：**17（推荐）或 21**；AGP 8.13.1 不支持 Java 25。Gradle 8.13、Kotlin 2.2.0。
 - 兼容处理：`KEY_LOW_LATENCY` 仅 API 30+、`KEY_PRIORITY` 仅 API 28+，低版本自动跳过；解码器 `csd-0/csd-1` 配置失败时回退为 in-band 参数集，并按 `MediaCodecList` 选择可用的 H.264 解码器。
@@ -33,7 +38,7 @@ make clean     # 清理构建产物
 - `protocol/`：帧格式、消息定义与跨语言测试向量
 - `mac/`：Swift Package（`MirageCore` 协议库 + `mirage-helper` 命令行）
 - `android/`：Android App（解码与显示）
-- `tools/`：联调脚本（模拟服务端/客户端）
+- `tools/`：联调脚本（模拟服务端/客户端）与 AOA USB 桥接（`aoa_bridge.c`）
 
 ## Mac
 
@@ -79,6 +84,7 @@ open build/.Mirage.app
 
 - **启动/停止服务** 开关（停止会结束已有的 helper 进程，包括在终端里手动启动的那个）
 - **启动 App 后自动启动服务** 开关：开启后，App 启动即启动 helper 并等待客户端连接（默认关闭）
+- **USB 免调试连接（AOA）** 开关：通过 Android Open Accessory 直接走 USB，不需要 adb；手机首次连接会弹出授权，勾选「连接后一律打开 Mirage」即可自动拉起
 - **副屏（虚拟显示器）** / **镜像主屏**：切换模式（会重启 helper；从副屏切回镜像时虚拟屏随旧进程退出消失）
 - **分辨率**：默认 **自动（匹配设备）**；也可选 960×600 / 1280×720 / 1280×800 / 1600×1000 / 1920×1080（4K）/ 1920×1200（HiDPI 2x 编码）。自动模式下 helper 收到设备 HELLO 后按设备像素重建虚拟屏，App 会自动重连一次
 - **旋转**：设备旋转后 App 自动重连并上报新尺寸，helper 重建对应方向的虚拟屏
@@ -88,7 +94,16 @@ open build/.Mirage.app
 
 菜单栏本身保留同样的模式、分辨率、帧率、启动/停止快捷入口。关闭或最小化主窗口不会退出 App，只保留菜单栏图标。
 
-App 启动时默认是**副屏模式**，且默认不会自动启动服务；可在主界面打开「启动 App 后自动启动服务」，或直接用 `open build/.Mirage.app --args --autostart extend` 启动并自动开始推流。开发时可用 `--args --show` 强制显示主窗口。
+App 启动时默认是**副屏模式**，且默认不会自动启动服务；可在主界面打开「启动 App 后自动启动服务」，或直接用 `open build/.Mirage.app --args --autostart extend` 启动并自动开始推流。开发时可用 `--args --show` 强制显示主窗口，或用 `--args --usb` 启动服务并直接建立 AOA USB 连接。
+
+### USB 免调试连接（AOA）
+
+1. `brew install libusb`，重新执行 `make app`。
+2. 在 Mac 主界面打开「USB 免调试连接（AOA）」，或 `open build/.Mirage.app --args --usb`。
+3. 手机首次会弹出 USB 授权，勾选「连接后一律打开 Mirage」并确定；之后插入 USB 会自动打开 App。
+4. 手机状态栏/调试浮层显示「已连接 USB」即表示走的是 accessory 通道；此时不需要 `adb reverse`。
+
+AOA 会占用手机的 accessory 功能（adb 可能仍可用，取决于 ROM）。停止 USB 连接后，手机通常要拔插一次 USB 才恢复普通 MTP 模式。helper 因自动分辨率重启时，`mirage-aoa` 会自动重连并重放 HELLO，Android 端无需操作。
 
 切换模式、分辨率或帧率会重启 helper，Android 端会在断开后按指数退避自动重连（首次连接失败仍需手动重试）。
 
@@ -124,8 +139,9 @@ cd android
 
 首次构建需要联网下载依赖。
 
-- 首次启动弹出「连接设置」（Mac 地址 / 端口），保存后每次启动自动连接。
+- 首次启动弹出「连接设置」（Mac 地址 / 端口），保存后每次启动自动连接；如果检测到 Mirage USB accessory，会优先走 USB，无需填写地址。
 - 连接后点屏幕右侧的窄手柄打开控制面板；未连接时在首屏点「设置」修改地址。连接断开会自动退避重连，重连期间「连接」按钮禁用，失败后才可手动重试。
+- 通过 USB accessory 接入时，App 会由 `USB_ACCESSORY_ATTACHED` intent 自动拉起；首次需在系统弹窗授权。
 - 设备旋转时 App 自动重连，helper 根据新的宽高重建对应方向的虚拟屏。
 - 画面按视频宽高比居中；自动分辨率下与设备比例一致，通常没有黑边，手动预设比例不同时才会留黑边。
 - 全屏沉浸式运行，系统状态栏/导航栏隐藏；连接后屏幕右侧有一个窄手柄，点开是滑出的控制面板（设置、调试开关、断开），面板带深色背景遮罩，不会再和顶部原生状态栏重叠。

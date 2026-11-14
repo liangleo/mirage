@@ -54,6 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HelperController.shared.start()
         }
 
+        if arguments.contains("--usb") {
+            HelperController.shared.setUsbBridge(true)
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             guard !arguments.contains("--show") else { return }
             for window in NSApplication.shared.windows where window.title == "Mirage" {
@@ -75,6 +79,9 @@ struct StatusMenu: View {
         Text(controller.status)
         Button(controller.isRunning ? "停止服务" : "启动服务") {
             controller.toggle()
+        }
+        Button(controller.usbBridgeRunning ? "停止 USB 连接" : "USB 连接（AOA）") {
+            controller.setUsbBridge(!controller.usbBridgeRunning)
         }
         Divider()
         Button {
@@ -155,6 +162,12 @@ struct MainView: View {
                 Toggle("启动 App 后自动启动服务", isOn: Binding(
                     get: { controller.autoStartOnLaunch },
                     set: { controller.setAutoStartOnLaunch($0) }
+                ))
+                .toggleStyle(.switch)
+
+                Toggle("USB 免调试连接（AOA）", isOn: Binding(
+                    get: { controller.usbBridgeRunning },
+                    set: { controller.setUsbBridge($0) }
                 ))
                 .toggleStyle(.switch)
             }
@@ -354,12 +367,14 @@ final class HelperController: ObservableObject {
     @Published private(set) var fps: Int
     @Published private(set) var autoStartOnLaunch: Bool
     @Published private(set) var isRunning = false
+    @Published private(set) var usbBridgeRunning = false
     @Published private(set) var status = "未运行"
 
     let logURL: URL
 
     private var process: Process?
     private var externalHelperPID: pid_t?
+    private var bridgeProcess: Process?
     private var monitorTimer: Timer?
     private var instanceLockFD: Int32 = -1
 
@@ -494,6 +509,81 @@ final class HelperController: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "autoStartOnLaunch")
     }
 
+    func setUsbBridge(_ enabled: Bool) {
+        if enabled {
+            startUsbBridge()
+        } else {
+            stopUsbBridge()
+        }
+    }
+
+    private func startUsbBridge() {
+        guard bridgeProcess == nil else { return }
+        if !isRunning {
+            start()
+        }
+        waitForHelperAndStartBridge(attempts: 30)
+    }
+
+    private func waitForHelperAndStartBridge(attempts: Int) {
+        guard bridgeProcess == nil else { return }
+        if listeningHelperPID() != nil {
+            launchBridge()
+            return
+        }
+        guard attempts > 0 else {
+            status = "USB 连接失败：helper 未就绪"
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.waitForHelperAndStartBridge(attempts: attempts - 1)
+        }
+    }
+
+    private func launchBridge() {
+        guard bridgeProcess == nil else { return }
+        guard let bridge = aoaBridgeURL else {
+            status = "找不到 mirage-aoa"
+            return
+        }
+
+        guard let logHandle = openAppendLog() else {
+            status = "无法写入日志"
+            return
+        }
+
+        let child = Process()
+        child.executableURL = bridge
+        child.arguments = ["--port", "7777"]
+        child.standardOutput = logHandle
+        child.standardError = logHandle
+        child.terminationHandler = { [weak self] ended in
+            DispatchQueue.main.async {
+                guard let self, self.bridgeProcess === ended else { return }
+                self.bridgeProcess = nil
+                self.usbBridgeRunning = false
+                self.status = "USB 桥接已停止（\(ended.terminationStatus)）· 查看日志"
+            }
+        }
+
+        do {
+            try child.run()
+        } catch {
+            status = "USB 桥接启动失败：\(error.localizedDescription)"
+            return
+        }
+        bridgeProcess = child
+        usbBridgeRunning = true
+    }
+
+    private func stopUsbBridge() {
+        if let child = bridgeProcess {
+            kill(child.processIdentifier, SIGKILL)
+        }
+        bridgeProcess = nil
+        usbBridgeRunning = false
+    }
+
     func toggle() {
         if isRunning {
             stop()
@@ -516,12 +606,10 @@ final class HelperController: ObservableObject {
             return
         }
 
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
-        guard let logHandle = try? FileHandle(forWritingTo: logURL) else {
+        guard let logHandle = openAppendLog() else {
             status = "无法写入日志"
             return
         }
-        logHandle.seekToEndOfFile()
 
         let child = Process()
         child.executableURL = helper
@@ -567,6 +655,12 @@ final class HelperController: ObservableObject {
     }
 
     func stop() {
+        stopUsbBridge()
+        stopHelperOnly()
+        status = "已停止"
+    }
+
+    private func stopHelperOnly() {
         if let child = process {
             kill(child.processIdentifier, SIGKILL)
         }
@@ -576,14 +670,27 @@ final class HelperController: ObservableObject {
         process = nil
         externalHelperPID = nil
         isRunning = false
-        status = "已停止"
     }
 
     private func restart() {
-        stop()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            self?.start()
+        if usbBridgeRunning {
+            stopHelperOnly()
+            status = "重启服务…"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                self?.start()
+            }
+        } else {
+            stop()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                self?.start()
+            }
         }
+    }
+
+    private func openAppendLog() -> FileHandle? {
+        let fd = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        guard fd >= 0 else { return nil }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }
 
     private var helperURL: URL? {
@@ -601,6 +708,27 @@ final class HelperController: ObservableObject {
         }
 
         if let path = ProcessInfo.processInfo.environment["MIRAGE_HELPER"],
+           FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
+    }
+
+    private var aoaBridgeURL: URL? {
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/mirage-aoa")
+        if FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled
+        }
+
+        if let executable = Bundle.main.executableURL {
+            let sibling = executable.deletingLastPathComponent().appendingPathComponent("mirage-aoa")
+            if FileManager.default.isExecutableFile(atPath: sibling.path) {
+                return sibling
+            }
+        }
+
+        if let path = ProcessInfo.processInfo.environment["MIRAGE_AOA"],
            FileManager.default.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)
         }
