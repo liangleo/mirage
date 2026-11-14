@@ -111,7 +111,7 @@ public final class HelperApp: @unchecked Sendable {
             server?.broadcast(frame)
         }
 
-        let capture = DisplayCapture(displayID: displayID, fps: fps, size: size) { [weak self] pixelBuffer, micros in
+        let capture = DisplayCapture(displayID: targetDisplayID, fps: fps, size: size) { [weak self] pixelBuffer, micros in
             guard let self, let encoder = self.encoder else { return }
             self.dumpFirstFrameIfNeeded(pixelBuffer)
             let forceKeyframe = self.keyframes.shouldForce(nowMicros: micros)
@@ -145,13 +145,13 @@ public final class HelperApp: @unchecked Sendable {
                 pointHeight: pointHeight,
                 name: "Mirage"
             )
-            if waitForDisplay(created.displayID, timeout: 2.0) {
+            if waitForDisplay(created.displayID, timeout: 5.0) {
                 virtualDisplay = created
                 print("extend display=\(created.displayID) points=\(pointWidth)x\(pointHeight)")
                 fflush(stdout)
                 return created.displayID
             }
-            print("extend_fallback=not_online")
+            print("extend_fallback=not_online after 5s; streaming main display instead")
             fflush(stdout)
             created.destroy()
             return displayID

@@ -48,6 +48,8 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         }
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
+        print("capture_selected displayID=\(display.displayID) size=\(display.width)x\(display.height)")
+        fflush(stdout)
         let config = SCStreamConfiguration()
         config.width = size.width
         config.height = size.height
