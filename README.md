@@ -87,7 +87,15 @@ App 启动时默认是**副屏模式并自动开始**，之后会记住你上次
 
 切换模式、分辨率或帧率会重启 helper，Android 端会在断开后按指数退避自动重连（首次连接失败仍需手动重试）。
 
-首次运行需要给 **Mirage.app** 授予「屏幕录制」权限，授权后重新打开。App 使用 ad-hoc 签名，每次重新打包后若权限失效，重新授权即可。
+首次运行需要给 **Mirage.app** 授予「屏幕录制」权限。App 默认使用本机 Apple Development 证书签名（Team ID 稳定），授权会跨启动和重新编译保留；`make run` 不会重复构建。
+
+如果之前装过 ad-hoc 签名的版本，先在系统设置里移除旧的 Mirage 条目，或执行：
+
+```bash
+tccutil reset ScreenCapture app.mirage.menu
+```
+
+然后重新启动 App 并授权一次。没有可用证书时可 `SIGN_IDENTITY=- make app` 退回 ad-hoc 签名，但每次重新编译后需要重新授权；有多张证书时可用 `SIGN_IDENTITY=<SHA1> make app` 指定。
 
 开发时也可以直接 `cd mac && swift run mirage-menu`（沿用终端的屏幕录制权限）。
 

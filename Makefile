@@ -12,6 +12,7 @@ GRADLE_JAVA_HOME := $(if $(JDK17),$(JDK17),$(if $(JDK21),$(JDK21),$(JAVA_HOME)))
 ANDROID_HOME ?=
 ADB ?= adb
 INSTALL_DIR ?= /Applications
+SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | awk '/Apple Development/ && !/CSSMERR/ {print $$2; exit}')
 DEVICE ?= $(shell $(ADB) devices 2>/dev/null | awk 'NR>1 && $$2=="device" {print $$1; exit}')
 
 .PHONY: help init build build-mac build-android app test clean install install-mac install-apk connect run dev logs
@@ -58,7 +59,7 @@ build-android:
 	cd $(ANDROID) && JAVA_HOME="$(GRADLE_JAVA_HOME)" ./gradlew :app:assembleDebug
 
 app:
-	bash $(ROOT)/tools/build_app.sh
+	SIGN_IDENTITY="$(SIGN_IDENTITY)" bash $(ROOT)/tools/build_app.sh
 
 test:
 	cd $(MAC) && swift test
@@ -89,7 +90,8 @@ connect:
 	fi; \
 	$(ADB) -s $$DEV reverse tcp:7777 tcp:7777 && echo "adb reverse 已设置 ($$DEV)"
 
-run: app
+run:
+	@if [ ! -d "$(APP)" ]; then $(MAKE) app; fi
 	open "$(APP)"
 
 dev:

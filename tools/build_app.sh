@@ -53,7 +53,16 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP" >/dev/null
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+if [ -n "$SIGN_IDENTITY" ] && [ "$SIGN_IDENTITY" != "-" ]; then
+  codesign --force --sign "$SIGN_IDENTITY" --identifier app.mirage.helper "$APP/Contents/MacOS/mirage-helper"
+  codesign --force --sign "$SIGN_IDENTITY" "$APP"
+  echo "signed with: $SIGN_IDENTITY"
+else
+  codesign --force --sign - --identifier app.mirage.helper "$APP/Contents/MacOS/mirage-helper"
+  codesign --force --sign - "$APP"
+  echo "ad-hoc signed (Screen Recording permission may be requested again after rebuild)"
+fi
 
 echo "built $APP"
 echo "open \"$APP\"   # or: open \"$APP\" --args --autostart extend"
