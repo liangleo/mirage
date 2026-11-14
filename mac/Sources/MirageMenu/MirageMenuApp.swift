@@ -76,6 +76,11 @@ struct MenuContent: View {
         Button("打开日志") {
             NSWorkspace.shared.open(controller.logURL)
         }
+        Button("打开屏幕录制设置") {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                NSWorkspace.shared.open(url)
+            }
+        }
         Divider()
         Button("退出 Mirage") {
             NSApplication.shared.terminate(nil)
@@ -232,7 +237,9 @@ final class HelperController: ObservableObject {
                 guard let self, self.process === ended else { return }
                 self.process = nil
                 self.isRunning = false
-                self.status = "已停止（\(ended.terminationStatus)）"
+                self.status = ended.terminationStatus == 0
+                    ? "已停止"
+                    : "已停止（\(ended.terminationStatus)）· 检查屏幕录制权限"
             }
         }
 
