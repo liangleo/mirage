@@ -1,6 +1,20 @@
 import SwiftUI
 import AppKit
 import Darwin
+import MirageCore
+
+private func centerWindowOnPrimaryScreen(title: String) {
+    DispatchQueue.main.async {
+        guard let window = NSApplication.shared.windows.first(where: { $0.title == title }),
+              let screen = NSScreen.screens.first else { return }
+        let size = window.frame.size
+        let visible = screen.visibleFrame
+        window.setFrameOrigin(NSPoint(
+            x: visible.midX - size.width / 2,
+            y: visible.midY - size.height / 2
+        ))
+    }
+}
 
 @main
 struct MirageMenuApp: App {
@@ -8,8 +22,13 @@ struct MirageMenuApp: App {
     @StateObject private var controller = HelperController.shared
 
     var body: some Scene {
+        Window("Mirage", id: "main") {
+            MainView(controller: controller)
+        }
+        .defaultSize(width: 520, height: 780)
+
         MenuBarExtra("Mirage", systemImage: "display") {
-            MenuContent(controller: controller)
+            StatusMenu(controller: controller)
         }
     }
 }
@@ -31,15 +50,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let mode = HelperController.Mode(rawValue: arguments[index + 1]) {
             HelperController.shared.setMode(mode)
             HelperController.shared.start()
+        } else if HelperController.shared.autoStartOnLaunch {
+            HelperController.shared.start()
         }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard !arguments.contains("--show") else { return }
+            for window in NSApplication.shared.windows where window.title == "Mirage" {
+                window.close()
+            }
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 }
 
-struct MenuContent: View {
+struct StatusMenu: View {
     @ObservedObject var controller: HelperController
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(controller.status)
+        Button(controller.isRunning ? "停止服务" : "启动服务") {
+            controller.toggle()
+        }
         Divider()
         Button {
             controller.setMode(.extend)
@@ -70,20 +106,209 @@ struct MenuContent: View {
             }
         }
         Divider()
-        Button(controller.isRunning ? "停止" : "启动") {
-            controller.toggle()
-        }
-        Button("打开日志") {
-            NSWorkspace.shared.open(controller.logURL)
-        }
-        Button("打开屏幕录制设置") {
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                NSWorkspace.shared.open(url)
-            }
+        Button("打开主界面") {
+            openWindow(id: "main")
+            NSApplication.shared.activate(ignoringOtherApps: true)
         }
         Divider()
         Button("退出 Mirage") {
             NSApplication.shared.terminate(nil)
+        }
+    }
+}
+
+struct MainView: View {
+    @ObservedObject var controller: HelperController
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "display")
+                    .font(.system(size: 30))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Mirage")
+                        .font(.title2.bold())
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(controller.isRunning ? Color.green : Color.gray)
+                            .frame(width: 8, height: 8)
+                        Text(controller.status)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("启动/停止服务", isOn: Binding(
+                    get: { controller.isRunning },
+                    set: { enabled in
+                        if enabled {
+                            controller.start()
+                        } else {
+                            controller.stop()
+                        }
+                    }
+                ))
+                .toggleStyle(.switch)
+
+                Toggle("启动 App 后自动启动服务", isOn: Binding(
+                    get: { controller.autoStartOnLaunch },
+                    set: { controller.setAutoStartOnLaunch($0) }
+                ))
+                .toggleStyle(.switch)
+            }
+
+            GroupBox("连接设置") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("模式", selection: Binding(
+                        get: { controller.mode },
+                        set: { controller.setMode($0) }
+                    )) {
+                        Text("副屏（虚拟显示器）").tag(HelperController.Mode.extend)
+                        Text("镜像主屏").tag(HelperController.Mode.mirror)
+                    }
+                    .pickerStyle(.segmented)
+
+                    Picker("分辨率", selection: Binding(
+                        get: { controller.resolution },
+                        set: { controller.setResolution($0) }
+                    )) {
+                        ForEach(HelperController.resolutions, id: \.self) { resolution in
+                            Text(resolution.label).tag(resolution)
+                        }
+                    }
+
+                    Picker("帧率", selection: Binding(
+                        get: { controller.fps },
+                        set: { controller.setFPS($0) }
+                    )) {
+                        ForEach(HelperController.frameRates, id: \.self) { fps in
+                            Text("\(fps) fps").tag(fps)
+                        }
+                    }
+                }
+                .padding(8)
+            }
+
+            HStack {
+                Button("日志文件") {
+                    NSWorkspace.shared.open(controller.logURL)
+                }
+                Button("屏幕录制设置") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("日志")
+                        .font(.headline)
+                    Spacer()
+                    Text("自动滚动")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                LogView(logURL: controller.logURL)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+
+            HStack {
+                Button("退出 Mirage") {
+                    NSApplication.shared.terminate(nil)
+                }
+                Spacer()
+                Button("关闭窗口") {
+                    NSApplication.shared.keyWindow?.close()
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 520, height: 780)
+        .onAppear {
+            centerWindowOnPrimaryScreen(title: "Mirage")
+        }
+    }
+}
+
+// Timer fires on the main run loop; all state access stays on main.
+final class LogTailer: ObservableObject, @unchecked Sendable {
+    @Published private(set) var text = ""
+
+    private let url: URL
+    private var tail = LogTail()
+    private var timer: Timer?
+    private var buffer = ""
+    private let maxCharacters = 200_000
+    private let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    init(url: URL) {
+        self.url = url
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+    }
+
+    deinit {
+        timer?.invalidate()
+    }
+
+    private func refresh() {
+        let chunk = tail.readNew(from: url)
+        guard !chunk.isEmpty else { return }
+
+        buffer += chunk
+        var lines = buffer.components(separatedBy: "\n")
+        guard lines.count > 1 else { return }
+        buffer = lines.removeLast()
+
+        let stamp = timeFormatter.string(from: Date())
+        let body = lines.map { line -> String in
+            let clean = line.hasSuffix("\r") ? String(line.dropLast()) : line
+            return clean.isEmpty ? "" : "[\(stamp)] \(clean)"
+        }.joined(separator: "\n")
+
+        text.append(body + "\n")
+        if text.count > maxCharacters {
+            text = String(text.suffix(maxCharacters))
+        }
+    }
+}
+
+struct LogView: View {
+    @StateObject private var tailer: LogTailer
+
+    init(logURL: URL) {
+        _tailer = StateObject(wrappedValue: LogTailer(url: logURL))
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                Text(tailer.text.isEmpty ? "暂无日志" : tailer.text)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(Color.green)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .id("bottom")
+            }
+            .background(Color.black)
+            .onChange(of: tailer.text) { _, _ in
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            .onAppear {
+                DispatchQueue.main.async {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
+            }
         }
     }
 }
@@ -127,12 +352,15 @@ final class HelperController: ObservableObject {
     @Published private(set) var mode: Mode
     @Published private(set) var resolution: Resolution
     @Published private(set) var fps: Int
+    @Published private(set) var autoStartOnLaunch: Bool
     @Published private(set) var isRunning = false
     @Published private(set) var status = "未运行"
 
     let logURL: URL
 
     private var process: Process?
+    private var externalHelperPID: pid_t?
+    private var monitorTimer: Timer?
     private var instanceLockFD: Int32 = -1
 
     private init() {
@@ -155,11 +383,61 @@ final class HelperController: ObservableObject {
 
         let savedFPS = UserDefaults.standard.integer(forKey: "fps")
         fps = Self.frameRates.contains(savedFPS) ? savedFPS : 60
+        autoStartOnLaunch = UserDefaults.standard.bool(forKey: "autoStartOnLaunch")
 
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/Mirage", isDirectory: true)
         try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         logURL = logs.appendingPathComponent("helper.log")
+
+        startMonitor()
+    }
+
+    private func startMonitor() {
+        let timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshExternalState()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        monitorTimer = timer
+        refreshExternalState()
+    }
+
+    private func refreshExternalState() {
+        guard process == nil else { return }
+
+        if let pid = listeningHelperPID() {
+            if externalHelperPID != pid {
+                externalHelperPID = pid
+                isRunning = true
+                status = "运行中（已有 helper）"
+            }
+        } else if externalHelperPID != nil {
+            externalHelperPID = nil
+            isRunning = false
+            status = "已停止"
+        }
+    }
+
+    private func listeningHelperPID() -> pid_t? {
+        let lsof = Process()
+        lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        lsof.arguments = ["-ti", "tcp:7777", "-sTCP:LISTEN"]
+        let pipe = Pipe()
+        lsof.standardOutput = pipe
+        lsof.standardError = FileHandle.nullDevice
+        do {
+            try lsof.run()
+        } catch {
+            return nil
+        }
+        lsof.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8),
+              let firstLine = text.split(separator: "\n").first,
+              let pid = pid_t(firstLine) else { return nil }
+        return pid
     }
 
     func acquireInstanceLock() -> Bool {
@@ -210,6 +488,12 @@ final class HelperController: ObservableObject {
         }
     }
 
+    func setAutoStartOnLaunch(_ enabled: Bool) {
+        guard enabled != autoStartOnLaunch else { return }
+        autoStartOnLaunch = enabled
+        UserDefaults.standard.set(enabled, forKey: "autoStartOnLaunch")
+    }
+
     func toggle() {
         if isRunning {
             stop()
@@ -222,6 +506,13 @@ final class HelperController: ObservableObject {
         guard process == nil else { return }
         guard let helper = helperURL else {
             status = "找不到 mirage-helper"
+            return
+        }
+
+        if let pid = listeningHelperPID() {
+            externalHelperPID = pid
+            isRunning = true
+            status = "运行中（已有 helper）"
             return
         }
 
@@ -256,32 +547,41 @@ final class HelperController: ObservableObject {
                 self.isRunning = false
                 self.status = ended.terminationStatus == 0
                     ? "已停止"
-                    : "已停止（\(ended.terminationStatus)）· 检查屏幕录制权限"
+                    : "已停止（退出码 \(ended.terminationStatus)）· 查看日志"
             }
-        }
-
-        do {
-            try child.run()
-        } catch {
-            status = "启动失败：\(error.localizedDescription)"
-            return
         }
 
         process = child
         isRunning = true
+
+        do {
+            try child.run()
+        } catch {
+            process = nil
+            isRunning = false
+            status = "启动失败：\(error.localizedDescription)"
+            return
+        }
+
         status = "运行中 · \(mode.title) · \(fps)fps"
     }
 
     func stop() {
-        process?.terminate()
+        if let child = process {
+            kill(child.processIdentifier, SIGKILL)
+        }
+        if let pid = externalHelperPID {
+            kill(pid, SIGKILL)
+        }
         process = nil
+        externalHelperPID = nil
         isRunning = false
         status = "已停止"
     }
 
     private func restart() {
         stop()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             self?.start()
         }
     }

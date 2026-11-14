@@ -13,13 +13,16 @@ import app.mirage.net.SessionConfig
 import app.mirage.net.StreamStats
 import app.mirage.net.VideoFrame
 import java.nio.ByteBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class VideoDecoder(
     private val surface: Surface,
     private val config: SessionConfig,
     private val stats: StreamStats,
     private val onError: (String) -> Unit,
-    private val onNeedKeyframe: () -> Unit = {}
+    private val onNeedKeyframe: () -> Unit = {},
+    private val onStopped: () -> Unit = {}
 ) {
     private val thread = HandlerThread("mirage-decoder").apply { start() }
     private val handler = Handler(thread.looper)
@@ -28,6 +31,9 @@ class VideoDecoder(
 
     @Volatile
     private var running = true
+
+    @Volatile
+    private var released = false
 
     @Volatile
     private var waitingForKeyframe = false
@@ -50,7 +56,11 @@ class VideoDecoder(
     }
 
     fun release() {
+        if (released) return
+        released = true
         running = false
+
+        val done = CountDownLatch(1)
         handler.post {
             try {
                 codec?.stop()
@@ -61,8 +71,13 @@ class VideoDecoder(
             } catch (_: Exception) {
             }
             codec = null
-            thread.quitSafely()
+            done.countDown()
         }
+        try {
+            done.await(1, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+        }
+        thread.quitSafely()
     }
 
     private fun loop() {
@@ -81,9 +96,13 @@ class VideoDecoder(
         } catch (error: Exception) {
             onError("decoder init failed: ${error.message}")
             queue.clear()
+            onNeedKeyframe()
             if (initFailures < MAX_INIT_FAILURES) {
                 initFailures++
                 handler.postDelayed({ loop() }, 500)
+            } else {
+                running = false
+                onStopped()
             }
             return
         }

@@ -14,20 +14,28 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -46,9 +54,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import app.mirage.net.Hello
 import app.mirage.net.MirageClient
@@ -56,7 +64,7 @@ import app.mirage.net.SessionConfig
 import app.mirage.net.StatsSnapshot
 import app.mirage.net.StreamStats
 import app.mirage.net.VideoFrame
-import app.mirage.ui.AspectTextureView
+import app.mirage.ui.AspectSurfaceView
 import app.mirage.ui.VideoView
 import app.mirage.video.VideoDecoder
 import kotlinx.coroutines.delay
@@ -68,6 +76,8 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var decoder: VideoDecoder? = null
 
+    private var decoderSurface: Surface? = null
+
     @Volatile
     private var surface: Surface? = null
 
@@ -77,7 +87,7 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var pendingKeyframe: VideoFrame? = null
 
-    private var surfaceView: AspectTextureView? = null
+    private var surfaceView: AspectSurfaceView? = null
     private var client: MirageClient? = null
     private val stats = StreamStats()
 
@@ -91,9 +101,14 @@ class MainActivity : ComponentActivity() {
     private var reconnectRunnable: Runnable? = null
     private val maxReconnectAttempts = 10
 
+    private var edgeTracking = false
+    private var edgeStartX = 0f
+    private var edgeLastX = 0f
+    private val edgeSwipeThreshold by lazy { 40 * resources.displayMetrics.density }
+
     private var connected by mutableStateOf(false)
     private var connecting by mutableStateOf(false)
-    private var toolbarVisible by mutableStateOf(true)
+    private var controlsVisible by mutableStateOf(false)
     private var showStats by mutableStateOf(false)
     private var phoneWidth by mutableStateOf(0)
     private var phoneHeight by mutableStateOf(0)
@@ -130,7 +145,6 @@ class MainActivity : ComponentActivity() {
                                 phoneHeight = phoneHeight,
                                 videoWidth = videoWidth,
                                 videoHeight = videoHeight,
-                                onSwipeDown = { toolbarVisible = true },
                                 onSurfaceReady = { view, newSurface ->
                                     surfaceView = view
                                     surface = newSurface
@@ -139,6 +153,7 @@ class MainActivity : ComponentActivity() {
                                 onSurfaceDestroyed = {
                                     decoder?.release()
                                     decoder = null
+                                    decoderSurface = null
                                     surface = null
                                 }
                             )
@@ -153,39 +168,48 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     showSettings = true
                                 }
-                            }
+                            },
+                            onSettings = { showSettings = true }
                         )
                     }
 
-                    LaunchedEffect(toolbarVisible, connected, showStats) {
-                        if (connected && toolbarVisible) {
-                            delay(3_000)
-                            toolbarVisible = false
-                        }
-                    }
-
-                    if (toolbarVisible || !connected) {
+                    if (connected && controlsVisible) {
                         Row(
-                            modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .fillMaxWidth()
-                                .background(Color.Black.copy(alpha = 0.6f))
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalArrangement = Arrangement.End
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { showSettings = true }) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                                    .background(Color.Black.copy(alpha = 0.25f))
+                                    .clickable { controlsVisible = false }
+                            )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .width(88.dp)
+                                    .background(Color(0xEE2B2B30))
+                                    .windowInsetsPadding(
+                                        WindowInsets.safeDrawing.only(
+                                            WindowInsetsSides.Top + WindowInsetsSides.End
+                                        )
+                                    )
+                                    .padding(vertical = 12.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                IconButton(onClick = {
+                                    controlsVisible = false
+                                    showSettings = true
+                                }) {
                                     Icon(
                                         Icons.Default.Settings,
                                         contentDescription = "设置",
-                                        modifier = Modifier.size(22.dp)
+                                        modifier = Modifier.size(24.dp)
                                     )
                                 }
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(end = 8.dp)
-                                ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
                                         Icons.Default.Info,
                                         contentDescription = "调试",
@@ -195,21 +219,36 @@ class MainActivity : ComponentActivity() {
                                         checked = showStats,
                                         onCheckedChange = { showStats = it },
                                         modifier = Modifier
-                                            .padding(start = 4.dp)
-                                            .scale(0.8f)
+                                            .padding(start = 2.dp)
+                                            .scale(0.7f)
                                     )
                                 }
-                            }
-                            if (connected) {
                                 IconButton(onClick = { disconnect() }) {
                                     Icon(
                                         Icons.Default.Close,
                                         contentDescription = "断开",
-                                        modifier = Modifier.size(22.dp)
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                Spacer(Modifier.weight(1f))
+                                IconButton(onClick = { controlsVisible = false }) {
+                                    Icon(
+                                        Icons.Default.KeyboardArrowRight,
+                                        contentDescription = "收起",
+                                        modifier = Modifier.size(24.dp)
                                     )
                                 }
                             }
                         }
+                    } else if (connected) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .size(width = 18.dp, height = 56.dp)
+                                .clip(RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp))
+                                .background(Color.Black.copy(alpha = 0.35f))
+                                .clickable { controlsVisible = true }
+                        )
                     }
                 }
 
@@ -238,6 +277,29 @@ class MainActivity : ComponentActivity() {
         }
 
         hideSystemBars()
+    }
+
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        when (event.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                edgeTracking = connected &&
+                    event.x > resources.displayMetrics.widthPixels * 0.85f
+                edgeStartX = event.x
+                edgeLastX = event.x
+            }
+            android.view.MotionEvent.ACTION_MOVE -> {
+                if (edgeTracking) edgeLastX = event.x
+            }
+            android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                if (edgeTracking && !controlsVisible &&
+                    edgeStartX - edgeLastX > edgeSwipeThreshold
+                ) {
+                    controlsVisible = true
+                }
+                edgeTracking = false
+            }
+        }
+        return super.dispatchTouchEvent(event)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -321,10 +383,12 @@ class MainActivity : ComponentActivity() {
         setKeepScreenOn(false)
         decoder?.release()
         decoder = null
+        decoderSurface = null
         config = null
         pendingKeyframe = null
         videoWidth = 0
         videoHeight = 0
+        controlsVisible = false
 
         if (manualDisconnect || !autoReconnectEnabled || isFinishing || isDestroyed) {
             if (!manualDisconnect) {
@@ -373,10 +437,12 @@ class MainActivity : ComponentActivity() {
         client = null
         decoder?.release()
         decoder = null
+        decoderSurface = null
         config = null
         pendingKeyframe = null
         surface = null
         surfaceView = null
+        controlsVisible = false
         connecting = false
         connected = false
         status = "未连接"
@@ -385,20 +451,34 @@ class MainActivity : ComponentActivity() {
     private fun maybeStartDecoder() {
         val currentConfig = config ?: return
         val currentSurface = surface ?: return
-        if (decoder != null) return
+        if (decoder != null && decoderSurface === currentSurface) return
+
+        decoder?.release()
+        decoder = null
+        decoderSurface = null
 
         surfaceView?.applyVideoSize(currentConfig.width, currentConfig.height)
-        val newDecoder = VideoDecoder(
+        var created: VideoDecoder? = null
+        created = VideoDecoder(
             surface = currentSurface,
             config = currentConfig,
             stats = stats,
             onError = { message -> mainHandler.post { status = message } },
-            onNeedKeyframe = { client?.requestKeyframe() }
+            onNeedKeyframe = { client?.requestKeyframe() },
+            onStopped = {
+                mainHandler.post {
+                    if (decoder === created) {
+                        decoder = null
+                        decoderSurface = null
+                    }
+                }
+            }
         )
-        decoder = newDecoder
-        newDecoder.start()
+        decoder = created
+        decoderSurface = currentSurface
+        created?.start()
         pendingKeyframe?.let {
-            newDecoder.submit(it)
+            created?.submit(it)
             pendingKeyframe = null
         }
         client?.requestKeyframe()
@@ -466,10 +546,16 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun DisconnectedScreen(status: String, connectEnabled: Boolean, onConnect: () -> Unit) {
+private fun DisconnectedScreen(
+    status: String,
+    connectEnabled: Boolean,
+    onConnect: () -> Unit,
+    onSettings: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
@@ -480,6 +566,10 @@ private fun DisconnectedScreen(status: String, connectEnabled: Boolean, onConnec
         Spacer(Modifier.height(24.dp))
         Button(onClick = onConnect, enabled = connectEnabled) {
             Text("连接")
+        }
+        Spacer(Modifier.height(8.dp))
+        TextButton(onClick = onSettings) {
+            Text("设置")
         }
     }
 }
@@ -548,8 +638,7 @@ private fun StreamingScreen(
     phoneHeight: Int,
     videoWidth: Int,
     videoHeight: Int,
-    onSwipeDown: () -> Unit,
-    onSurfaceReady: (AspectTextureView, Surface) -> Unit,
+    onSurfaceReady: (AspectSurfaceView, Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit
 ) {
     var snapshot by remember { mutableStateOf(StatsSnapshot()) }
@@ -565,28 +654,6 @@ private fun StreamingScreen(
             onSurfaceReady = onSurfaceReady,
             onSurfaceDestroyed = onSurfaceDestroyed
         )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(Unit) {
-                    var startY = 0f
-                    var totalDrag = 0f
-                    detectVerticalDragGestures(
-                        onDragStart = { offset ->
-                            startY = offset.y
-                            totalDrag = 0f
-                        },
-                        onVerticalDrag = { _, dragAmount ->
-                            totalDrag += dragAmount
-                        },
-                        onDragEnd = {
-                            if (startY < size.height * 0.2f && totalDrag > 80.dp.toPx()) {
-                                onSwipeDown()
-                            }
-                        }
-                    )
-                }
-        )
         if (showStats) {
             Column(
                 modifier = Modifier
@@ -594,15 +661,20 @@ private fun StreamingScreen(
                     .background(Color.Black.copy(alpha = 0.5f))
                     .padding(12.dp)
             ) {
-                val e2e = if (snapshot.e2eMs >= 0) {
-                    " · e2e≈${snapshot.e2eMs + snapshot.decodeMs} ms"
-                } else {
-                    ""
-                }
                 val codec = if (snapshot.codec.isNotEmpty()) " · ${snapshot.codec}" else ""
                 Text(
-                    "${snapshot.fps} fps · ${snapshot.decodeMs} ms · " +
-                        "%.1f Mbps · drop ${snapshot.dropped}%s%s".format(snapshot.bitrateMbps, e2e, codec),
+                    "${snapshot.fps} fps · %.1f Mbps · drop ${snapshot.dropped}%s"
+                        .format(snapshot.bitrateMbps, codec),
+                    color = Color.White
+                )
+                val e2e = if (snapshot.e2eMs >= 0) {
+                    "${snapshot.e2eMs + snapshot.decodeMs}"
+                } else {
+                    "--"
+                }
+                val rtt = if (snapshot.rttMs >= 0) "${snapshot.rttMs}" else "--"
+                Text(
+                    "延迟 decode=${snapshot.decodeMs} ms · e2e=$e2e ms · rtt=$rtt ms",
                     color = Color.White
                 )
                 if (phoneWidth > 0 && videoWidth > 0) {

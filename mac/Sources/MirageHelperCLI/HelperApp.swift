@@ -81,7 +81,9 @@ public final class HelperApp: @unchecked Sendable {
         guard let capturedSize = captureSize(for: targetDisplayID) else {
             throw HelperAppError.invalidDisplay(targetDisplayID)
         }
-        let size = fittedCaptureSize(capturedSize, maxWidth: maxWidth, maxHeight: maxHeight)
+        let effectiveMaxWidth = autoSize ? max(maxWidth, 4096) : maxWidth
+        let effectiveMaxHeight = autoSize ? max(maxHeight, 4096) : maxHeight
+        let size = fittedCaptureSize(capturedSize, maxWidth: effectiveMaxWidth, maxHeight: effectiveMaxHeight)
         print("display=\(targetDisplayID) capture=\(size.width)x\(size.height) source=\(capturedSize.width)x\(capturedSize.height) mode=\(mode.rawValue)")
         fflush(stdout)
 

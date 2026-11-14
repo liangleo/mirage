@@ -6,6 +6,7 @@ data class StatsSnapshot(
     val bitrateMbps: Double = 0.0,
     val dropped: Int = 0,
     val e2eMs: Long = -1,
+    val rttMs: Long = -1,
     val codec: String = ""
 )
 
@@ -22,6 +23,9 @@ class StreamStats {
 
     @Volatile
     private var e2eMs = -1L
+
+    @Volatile
+    private var rttMs = -1L
 
     @Volatile
     private var codecLabel = ""
@@ -48,6 +52,10 @@ class StreamStats {
         e2eMs = value
     }
 
+    fun setRttMs(value: Long) {
+        rttMs = value
+    }
+
     fun setCodecLabel(value: String) {
         codecLabel = value
     }
@@ -63,6 +71,6 @@ class StreamStats {
         frames = 0
         bytes = 0
         lastTickMs = nowMs
-        return StatsSnapshot(fps, decodeMs, bitrateMbps, dropped, e2eMs, codecLabel)
+        return StatsSnapshot(fps, decodeMs, bitrateMbps, dropped, e2eMs, rttMs, codecLabel)
     }
 }

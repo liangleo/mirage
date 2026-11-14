@@ -24,6 +24,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "MirageMenu",
+            dependencies: ["MirageCore"],
             path: "Sources/MirageMenu"
         ),
         .testTarget(name: "MirageCoreTests", dependencies: ["MirageCore", "MirageHelper"]),

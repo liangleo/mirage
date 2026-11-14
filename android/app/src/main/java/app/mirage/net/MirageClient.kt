@@ -90,6 +90,7 @@ class MirageClient(
             val sentNanos = pendingPingSentNanos
             if (sentNanos != null) {
                 val rttMicros = (nowNanos - sentNanos) / 1000
+                stats.setRttMs(rttMicros / 1000)
                 if (payload.size >= 16) {
                     val macMicros = ByteBuffer.wrap(payload, 8, 8).order(ByteOrder.BIG_ENDIAN).long
                     clockOffsetMicros = nowNanos / 1000 - rttMicros / 2 - macMicros

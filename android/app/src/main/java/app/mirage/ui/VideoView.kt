@@ -1,10 +1,10 @@
 package app.mirage.ui
 
 import android.content.Context
-import android.graphics.SurfaceTexture
 import android.util.AttributeSet
 import android.view.Surface
-import android.view.TextureView
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -12,10 +12,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 
-class AspectTextureView @JvmOverloads constructor(
+class AspectSurfaceView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
-) : TextureView(context, attrs) {
+) : SurfaceView(context, attrs) {
     var videoWidth: Int = 0
         set(value) {
             field = value
@@ -54,41 +54,30 @@ class AspectTextureView @JvmOverloads constructor(
 @Composable
 fun VideoView(
     modifier: Modifier = Modifier,
-    onSurfaceReady: (AspectTextureView, Surface) -> Unit,
+    onSurfaceReady: (AspectSurfaceView, Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit = {}
 ) {
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         AndroidView(
             factory = { context ->
-                AspectTextureView(context).apply {
-                    val view = this
-                    var surface: Surface? = null
-                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                        override fun onSurfaceTextureAvailable(
-                            texture: SurfaceTexture,
-                            width: Int,
-                            height: Int
-                        ) {
-                            val newSurface = Surface(texture)
-                            surface = newSurface
-                            onSurfaceReady(view, newSurface)
+                AspectSurfaceView(context).apply {
+                    val surfaceView = this
+                    holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            onSurfaceReady(surfaceView, holder.surface)
                         }
 
-                        override fun onSurfaceTextureSizeChanged(
-                            texture: SurfaceTexture,
+                        override fun surfaceChanged(
+                            holder: SurfaceHolder,
+                            format: Int,
                             width: Int,
                             height: Int
                         ) = Unit
 
-                        override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
                             onSurfaceDestroyed()
-                            surface?.release()
-                            surface = null
-                            return true
                         }
-
-                        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
-                    }
+                    })
                 }
             }
         )
