@@ -41,6 +41,24 @@ swift run mirage-helper --mode extend --width 1280 --height 800
 - 确认 `adb reverse tcp:7777 tcp:7777` 仍在，App 里地址是 `127.0.0.1:7777`。
 - 仍黑屏时看 App 日志：`adb logcat -s Mirage`，正常应出现 `first keyframe`、`configure`、`first output`。
 
+## 菜单栏 App
+
+```bash
+bash tools/build_app.sh
+open build/Mirage.app
+```
+
+菜单栏会出现显示器图标，菜单里可以：
+
+- **副屏（虚拟显示器）** / **镜像主屏**：切换模式（会重启 helper 子进程；从副屏切回镜像时虚拟屏随旧进程退出消失）
+- **启动 / 停止**
+- **打开日志**：`~/Library/Logs/Mirage/helper.log`
+- **退出 Mirage**：同时结束 helper
+
+首次运行需要给 **Mirage.app** 授予「屏幕录制」权限，授权后重新打开。App 使用 ad-hoc 签名，每次重新打包后若权限失效，重新授权即可。
+
+开发时也可以直接 `cd mac && swift run mirage-menu`（沿用终端的屏幕录制权限）。
+
 默认捕获主显示器；超过 `--max-width/--max-height`（默认 3840×2160）的屏幕会等比缩放。
 运行时每 60 帧打印一次 `stats encode_frames=… avg_encode_ms=…`。
 Android 端连接后左上角显示 fps、解码耗时、码率、丢帧和估算端到端延迟。
