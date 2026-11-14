@@ -7,19 +7,34 @@ import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.Surface
+import android.view.WindowManager
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -33,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import app.mirage.net.Hello
 import app.mirage.net.MirageClient
@@ -76,6 +92,13 @@ class MainActivity : ComponentActivity() {
     private val maxReconnectAttempts = 10
 
     private var connected by mutableStateOf(false)
+    private var connecting by mutableStateOf(false)
+    private var toolbarVisible by mutableStateOf(true)
+    private var showStats by mutableStateOf(false)
+    private var phoneWidth by mutableStateOf(0)
+    private var phoneHeight by mutableStateOf(0)
+    private var videoWidth by mutableStateOf(0)
+    private var videoHeight by mutableStateOf(0)
     private var status by mutableStateOf("未连接")
     private var showSettings by mutableStateOf(false)
 
@@ -85,6 +108,9 @@ class MainActivity : ComponentActivity() {
         val preferences = getSharedPreferences("mirage", Context.MODE_PRIVATE)
         savedHost = preferences.getString("host", "") ?: ""
         savedPort = preferences.getInt("port", 0)
+        val metrics = screenMetrics()
+        phoneWidth = metrics.widthPixels
+        phoneHeight = metrics.heightPixels
         val configured = savedHost.isNotBlank() && savedPort > 0
         if (!configured) {
             status = "请先设置 Mac 地址"
@@ -95,23 +121,40 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Box(modifier = Modifier.fillMaxSize()) {
                     if (connected) {
-                        StreamingScreen(
-                            stats = stats,
-                            status = status,
-                            onSurfaceReady = { view, newSurface ->
-                                surfaceView = view
-                                surface = newSurface
-                                maybeStartDecoder()
-                            },
-                            onSurfaceDestroyed = {
-                                decoder?.release()
-                                decoder = null
-                                surface = null
-                            }
-                        )
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            StreamingScreen(
+                                stats = stats,
+                                status = status,
+                                showStats = showStats,
+                                phoneWidth = phoneWidth,
+                                phoneHeight = phoneHeight,
+                                videoWidth = videoWidth,
+                                videoHeight = videoHeight,
+                                onSurfaceReady = { view, newSurface ->
+                                    surfaceView = view
+                                    surface = newSurface
+                                    maybeStartDecoder()
+                                },
+                                onSurfaceDestroyed = {
+                                    decoder?.release()
+                                    decoder = null
+                                    surface = null
+                                }
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .pointerInput(Unit) {
+                                        detectTapGestures {
+                                            toolbarVisible = !toolbarVisible
+                                        }
+                                    }
+                            )
+                        }
                     } else {
                         DisconnectedScreen(
                             status = status,
+                            connectEnabled = !connecting,
                             onConnect = {
                                 if (savedHost.isNotBlank() && savedPort > 0) {
                                     connect(savedHost, savedPort)
@@ -122,18 +165,45 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        TextButton(onClick = { showSettings = true }) {
-                            Text("设置")
+                    LaunchedEffect(toolbarVisible, connected, showStats) {
+                        if (connected && toolbarVisible) {
+                            delay(3_000)
+                            toolbarVisible = false
                         }
-                        if (connected) {
-                            TextButton(onClick = { disconnect() }) {
-                                Text("断开")
+                    }
+
+                    AnimatedVisibility(
+                        visible = toolbarVisible || !connected,
+                        enter = slideInVertically { -it },
+                        exit = slideOutVertically { -it },
+                        modifier = Modifier.align(Alignment.TopCenter)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color.Black.copy(alpha = 0.6f))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconTextButton(
+                                    icon = Icons.Default.Settings,
+                                    label = "设置",
+                                    onClick = { showSettings = true }
+                                )
+                                IconTextButton(
+                                    icon = Icons.Default.Info,
+                                    label = "调试",
+                                    onClick = { showStats = !showStats }
+                                )
+                            }
+                            if (connected) {
+                                IconTextButton(
+                                    icon = Icons.Default.Close,
+                                    label = "断开",
+                                    onClick = { disconnect() }
+                                )
                             }
                         }
                     }
@@ -162,6 +232,32 @@ class MainActivity : ComponentActivity() {
         if (configured) {
             connect(savedHost, savedPort)
         }
+
+        hideSystemBars()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            hideSystemBars()
+        }
+    }
+
+    private fun hideSystemBars() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    private fun setKeepScreenOn(enabled: Boolean) {
+        if (enabled) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     override fun onDestroy() {
@@ -177,6 +273,7 @@ class MainActivity : ComponentActivity() {
             manualDisconnect = false
             reconnectAttempts = 0
         }
+        connecting = true
         status = if (isReconnect) "重连中…（第 $reconnectAttempts 次）" else "连接中…"
 
         client?.close()
@@ -187,7 +284,11 @@ class MainActivity : ComponentActivity() {
                 mainHandler.post {
                     autoReconnectEnabled = true
                     reconnectAttempts = 0
+                    connecting = false
                     config = newConfig
+                    videoWidth = newConfig.width
+                    videoHeight = newConfig.height
+                    setKeepScreenOn(true)
                     status = "已连接 ${newConfig.width}x${newConfig.height}@${newConfig.fps}"
                     connected = true
                     maybeStartDecoder()
@@ -213,21 +314,26 @@ class MainActivity : ComponentActivity() {
 
     private fun handleConnectionClosed(reason: String) {
         client = null
+        setKeepScreenOn(false)
         decoder?.release()
         decoder = null
         config = null
         pendingKeyframe = null
+        videoWidth = 0
+        videoHeight = 0
 
         if (manualDisconnect || !autoReconnectEnabled || isFinishing || isDestroyed) {
             if (!manualDisconnect) {
                 status = reason
             }
+            connecting = false
             connected = false
             return
         }
 
         if (reconnectAttempts >= maxReconnectAttempts) {
             autoReconnectEnabled = false
+            connecting = false
             connected = false
             status = "无法连接（$reason）"
             return
@@ -256,6 +362,7 @@ class MainActivity : ComponentActivity() {
     private fun disconnect() {
         manualDisconnect = true
         autoReconnectEnabled = false
+        setKeepScreenOn(false)
         reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
         reconnectRunnable = null
         client?.close()
@@ -266,6 +373,7 @@ class MainActivity : ComponentActivity() {
         pendingKeyframe = null
         surface = null
         surfaceView = null
+        connecting = false
         connected = false
         status = "未连接"
     }
@@ -297,20 +405,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildHello(): Hello {
-        @Suppress("DEPRECATION")
-        val currentDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            display ?: windowManager.defaultDisplay
-        } else {
-            windowManager.defaultDisplay
-        }
-
-        val metrics = DisplayMetrics()
-        if (currentDisplay != null) {
-            currentDisplay.getRealMetrics(metrics)
-        } else {
-            @Suppress("DEPRECATION")
-            metrics.setTo(resources.displayMetrics)
-        }
+        val currentDisplay = currentDisplay()
+        val metrics = screenMetrics()
 
         val rotation = when (currentDisplay?.rotation ?: Surface.ROTATION_0) {
             Surface.ROTATION_90 -> 1
@@ -334,6 +430,26 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    @Suppress("DEPRECATION")
+    private fun currentDisplay(): android.view.Display? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display ?: windowManager.defaultDisplay
+        } else {
+            windowManager.defaultDisplay
+        }
+
+    private fun screenMetrics(): DisplayMetrics {
+        val metrics = DisplayMetrics()
+        val current = currentDisplay()
+        if (current != null) {
+            current.getRealMetrics(metrics)
+        } else {
+            @Suppress("DEPRECATION")
+            metrics.setTo(resources.displayMetrics)
+        }
+        return metrics
+    }
+
     private fun deviceID(): ByteArray {
         val preferences = getSharedPreferences("mirage", Context.MODE_PRIVATE)
         val stored = preferences.getString("device_id", null)
@@ -350,7 +466,20 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun DisconnectedScreen(status: String, onConnect: () -> Unit) {
+private fun IconTextButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    TextButton(onClick = onClick) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.size(4.dp))
+        Text(label)
+    }
+}
+
+@Composable
+private fun DisconnectedScreen(status: String, connectEnabled: Boolean, onConnect: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -362,7 +491,7 @@ private fun DisconnectedScreen(status: String, onConnect: () -> Unit) {
         Spacer(Modifier.height(16.dp))
         Text(status)
         Spacer(Modifier.height(24.dp))
-        Button(onClick = onConnect) {
+        Button(onClick = onConnect, enabled = connectEnabled) {
             Text("连接")
         }
     }
@@ -427,6 +556,11 @@ private fun SettingsDialog(
 private fun StreamingScreen(
     stats: StreamStats,
     status: String,
+    showStats: Boolean,
+    phoneWidth: Int,
+    phoneHeight: Int,
+    videoWidth: Int,
+    videoHeight: Int,
     onSurfaceReady: (AspectSurfaceView, Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit
 ) {
@@ -443,24 +577,32 @@ private fun StreamingScreen(
             onSurfaceReady = onSurfaceReady,
             onSurfaceDestroyed = onSurfaceDestroyed
         )
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .background(Color.Black.copy(alpha = 0.5f))
-                .padding(12.dp)
-        ) {
-            val e2e = if (snapshot.e2eMs >= 0) {
-                " · e2e≈${snapshot.e2eMs + snapshot.decodeMs} ms"
-            } else {
-                ""
+        if (showStats) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .padding(12.dp)
+            ) {
+                val e2e = if (snapshot.e2eMs >= 0) {
+                    " · e2e≈${snapshot.e2eMs + snapshot.decodeMs} ms"
+                } else {
+                    ""
+                }
+                val codec = if (snapshot.codec.isNotEmpty()) " · ${snapshot.codec}" else ""
+                Text(
+                    "${snapshot.fps} fps · ${snapshot.decodeMs} ms · " +
+                        "%.1f Mbps · drop ${snapshot.dropped}%s%s".format(snapshot.bitrateMbps, e2e, codec),
+                    color = Color.White
+                )
+                if (phoneWidth > 0 && videoWidth > 0) {
+                    Text(
+                        "手机 ${phoneWidth}×${phoneHeight} · Mac ${videoWidth}×${videoHeight}",
+                        color = Color.White
+                    )
+                }
+                Text(status, color = Color.White)
             }
-            val codec = if (snapshot.codec.isNotEmpty()) " · ${snapshot.codec}" else ""
-            Text(
-                "${snapshot.fps} fps · ${snapshot.decodeMs} ms · " +
-                    "%.1f Mbps · drop ${snapshot.dropped}%s%s".format(snapshot.bitrateMbps, e2e, codec),
-                color = Color.White
-            )
-            Text(status, color = Color.White)
         }
     }
 }
