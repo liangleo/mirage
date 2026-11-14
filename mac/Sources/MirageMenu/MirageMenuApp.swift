@@ -20,12 +20,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = CommandLine.arguments
-        guard let index = arguments.firstIndex(of: "--autostart"),
-              index + 1 < arguments.count,
-              let mode = HelperController.Mode(rawValue: arguments[index + 1]) else {
-            return
+        if let index = arguments.firstIndex(of: "--autostart"),
+           index + 1 < arguments.count,
+           let mode = HelperController.Mode(rawValue: arguments[index + 1]) {
+            HelperController.shared.setMode(mode)
         }
-        HelperController.shared.setMode(mode)
         HelperController.shared.start()
     }
 }
@@ -47,6 +46,15 @@ struct MenuContent: View {
             if !controller.isRunning { controller.start() }
         } label: {
             Text((controller.mode == .mirror ? "✓ " : "") + "镜像主屏")
+        }
+        Divider()
+        Menu("分辨率：\(controller.resolution.label)") {
+            ForEach(HelperController.resolutions, id: \.self) { resolution in
+                Button((controller.resolution == resolution ? "✓ " : "")
+                    + "\(resolution.label)（编码 \(resolution.width * 2)×\(resolution.height * 2)）") {
+                    controller.setResolution(resolution)
+                }
+            }
         }
         Divider()
         Button(controller.isRunning ? "停止" : "启动") {
@@ -75,7 +83,21 @@ final class HelperController: ObservableObject {
         }
     }
 
+    struct Resolution: Hashable {
+        let width: Int
+        let height: Int
+
+        var label: String { "\(width)×\(height)" }
+    }
+
+    static let resolutions: [Resolution] = [
+        Resolution(width: 1280, height: 800),
+        Resolution(width: 1600, height: 1000),
+        Resolution(width: 1920, height: 1200),
+    ]
+
     @Published private(set) var mode: Mode
+    @Published private(set) var resolution: Resolution
     @Published private(set) var isRunning = false
     @Published private(set) var status = "未运行"
 
@@ -84,8 +106,15 @@ final class HelperController: ObservableObject {
     private var process: Process?
 
     private init() {
-        let saved = UserDefaults.standard.string(forKey: "mode").flatMap(Mode.init(rawValue:)) ?? .mirror
-        mode = saved
+        let savedMode = UserDefaults.standard.string(forKey: "mode").flatMap(Mode.init(rawValue:)) ?? .extend
+        mode = savedMode
+
+        let savedWidth = UserDefaults.standard.integer(forKey: "resolutionWidth")
+        let savedHeight = UserDefaults.standard.integer(forKey: "resolutionHeight")
+        let savedResolution = Resolution(width: savedWidth, height: savedHeight)
+        resolution = Self.resolutions.contains(savedResolution)
+            ? savedResolution
+            : Self.resolutions[0]
 
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/Mirage", isDirectory: true)
@@ -97,6 +126,16 @@ final class HelperController: ObservableObject {
         guard newMode != mode else { return }
         mode = newMode
         UserDefaults.standard.set(newMode.rawValue, forKey: "mode")
+        if isRunning {
+            restart()
+        }
+    }
+
+    func setResolution(_ newResolution: Resolution) {
+        guard newResolution != resolution else { return }
+        resolution = newResolution
+        UserDefaults.standard.set(newResolution.width, forKey: "resolutionWidth")
+        UserDefaults.standard.set(newResolution.height, forKey: "resolutionHeight")
         if isRunning {
             restart()
         }
@@ -126,7 +165,16 @@ final class HelperController: ObservableObject {
 
         let child = Process()
         child.executableURL = helper
-        child.arguments = ["--mode", mode.rawValue, "--port", "7777"]
+        var arguments = ["--mode", mode.rawValue, "--port", "7777"]
+        if mode == .extend {
+            arguments += ["--width", "\(resolution.width)", "--height", "\(resolution.height)"]
+        } else {
+            arguments += [
+                "--max-width", "\(resolution.width * 2)",
+                "--max-height", "\(resolution.height * 2)",
+            ]
+        }
+        child.arguments = arguments
         child.standardOutput = logHandle
         child.standardError = logHandle
         child.terminationHandler = { [weak self] ended in
