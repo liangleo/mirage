@@ -214,7 +214,7 @@ public final class MirageServer: @unchecked Sendable {
         }
     }
 
-    private func send(_ frame: Frame, on connection: NWConnection, completion: (() -> Void)? = nil) {
+    private func send(_ frame: Frame, on connection: NWConnection, completion: (@Sendable () -> Void)? = nil) {
         connection.send(
             content: encodeFrame(frame),
             contentContext: .defaultMessage,

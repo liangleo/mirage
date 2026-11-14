@@ -4,7 +4,7 @@ import CoreMedia
 import CoreVideo
 import MirageCore
 
-public struct EncodedFrame {
+public struct EncodedFrame: Sendable {
     public let header: VideoHeader
     public let data: Data
     public let encodeLatencyMicros: UInt64

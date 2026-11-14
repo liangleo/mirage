@@ -11,7 +11,7 @@ public enum MessageType: UInt8 {
     case bye = 8
 }
 
-public struct Frame: Equatable {
+public struct Frame: Equatable, Sendable {
     public let type: UInt8
     public let payload: Data
 

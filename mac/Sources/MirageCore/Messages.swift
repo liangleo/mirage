@@ -62,7 +62,7 @@ public struct SessionConfig: Equatable {
     }
 }
 
-public struct VideoHeader: Equatable {
+public struct VideoHeader: Equatable, Sendable {
     public let codec: UInt8
     public let flags: UInt8
     public let frameID: UInt32

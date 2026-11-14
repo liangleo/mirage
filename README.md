@@ -60,7 +60,7 @@ swift run mirage-helper --mode extend --width 1280 --height 800
 
 ### 黑屏排查
 
-- 确认只有一个 helper 在跑：`lsof -ti tcp:7777`；有多个或旧进程时先 `pkill -f mirage-helper` 再重启。
+- 确认只有一个 helper 在跑：`lsof -ti tcp:7777`；有多个或旧进程时先 `pkill -x mirage-helper` 再重启。
 - 重新编译后必须重启 helper，旧进程仍在用旧逻辑。
 - 确认 `adb reverse tcp:7777 tcp:7777` 仍在，App 里地址是 `127.0.0.1:7777`。
 - 仍黑屏时看 App 日志：`adb logcat -s Mirage`，正常应出现 `first keyframe`、`configure`、`first output`。
@@ -119,3 +119,9 @@ cd android
 ```
 
 首次构建需要联网下载依赖。
+
+- 首次启动弹出「连接设置」（Mac 地址 / 端口），保存后每次启动自动连接。
+- 右上角「设置」可随时修改地址；连接断开会自动退避重连。
+- 设备旋转时 App 自动重连，helper 根据新的宽高重建对应方向的虚拟屏。
+- 画面按视频宽高比居中；自动分辨率下与设备比例一致，通常没有黑边，手动预设比例不同时才会留黑边。
+- 手机重连/重启后需要重跑 `make connect` 设置 adb reverse。
