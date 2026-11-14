@@ -30,8 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            index + 1 < arguments.count,
            let mode = HelperController.Mode(rawValue: arguments[index + 1]) {
             HelperController.shared.setMode(mode)
+            HelperController.shared.start()
         }
-        HelperController.shared.start()
     }
 }
 

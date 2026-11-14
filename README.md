@@ -83,7 +83,7 @@ open build/.Mirage.app
 - **打开日志**：`~/Library/Logs/Mirage/helper.log`
 - **退出 Mirage**：同时结束 helper
 
-App 启动时默认是**副屏模式并自动开始**，之后会记住你上次选择的模式和分辨率。
+App 启动时默认是**副屏模式**，但不会自动开始；点菜单里的「启动」后才开始捕获推流（避免每次打开都触发屏幕录制指示）。需要开机/启动自动连接时可用 `open build/.Mirage.app --args --autostart extend`。
 
 切换模式、分辨率或帧率会重启 helper，Android 端会在断开后按指数退避自动重连（首次连接失败仍需手动重试）。
 
