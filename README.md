@@ -27,6 +27,20 @@ swift run mirage-helper --mode extend --width 1280 --height 800
 虚拟屏尺寸以点为单位，默认 1280×800（HiDPI 下编码 2560×1600）。
 调试：`--dump-frame <png>` 保存第一帧原始画面，`--record <h264>` 保存发送的 Annex-B 码流。
 
+### 副屏模式怎么用
+
+1. 运行 `swift run mirage-helper --mode extend`。
+2. 系统设置 → 显示器：会多出名为 Mirage 的显示器，按需要排列它的位置（通常在主屏左侧）。
+3. 把窗口拖到那块屏所在的方向；Mission Control 里也能看到它。模拟器里显示的就是这块虚拟屏。
+4. 新虚拟屏上没有窗口时只显示壁纸或黑色，属正常。
+
+### 黑屏排查
+
+- 确认只有一个 helper 在跑：`lsof -ti tcp:7777`；有多个或旧进程时先 `pkill -f mirage-helper` 再重启。
+- 重新编译后必须重启 helper，旧进程仍在用旧逻辑。
+- 确认 `adb reverse tcp:7777 tcp:7777` 仍在，App 里地址是 `127.0.0.1:7777`。
+- 仍黑屏时看 App 日志：`adb logcat -s Mirage`，正常应出现 `first keyframe`、`configure`、`first output`。
+
 默认捕获主显示器；超过 `--max-width/--max-height`（默认 3840×2160）的屏幕会等比缩放。
 运行时每 60 帧打印一次 `stats encode_frames=… avg_encode_ms=…`。
 Android 端连接后左上角显示 fps、解码耗时、码率、丢帧和估算端到端延迟。
