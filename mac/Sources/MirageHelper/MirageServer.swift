@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Darwin
 import MirageCore
 
 public enum ServerError: Error {
@@ -28,6 +29,7 @@ private final class StartResult: @unchecked Sendable {
 public final class MirageServer: @unchecked Sendable {
     public var onKeyframeRequest: (() -> Void)?
     public var onLog: ((String) -> Void)?
+    public var onHello: ((Hello) -> Void)?
 
     private let port: UInt16
     private let session: Session
@@ -185,6 +187,11 @@ public final class MirageServer: @unchecked Sendable {
     }
 
     private func handle(_ frame: Frame, on connection: NWConnection) {
+        if frame.type == MessageType.hello.rawValue,
+           let hello = try? decodeHello(frame.payload) {
+            onHello?(hello)
+        }
+
         for action in session.handle(frame, nowMicros: monotonicMicros()) {
             switch action {
             case .send(let outbound):

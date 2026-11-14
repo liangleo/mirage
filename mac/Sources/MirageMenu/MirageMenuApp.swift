@@ -57,7 +57,7 @@ struct MenuContent: View {
         Menu("分辨率：\(controller.resolution.label)") {
             ForEach(HelperController.resolutions, id: \.self) { resolution in
                 Button((controller.resolution == resolution ? "✓ " : "")
-                    + "\(resolution.label)（编码 \(resolution.width * 2)×\(resolution.height * 2)）") {
+                    + resolution.menuLabel) {
                     controller.setResolution(resolution)
                 }
             }
@@ -105,10 +105,15 @@ final class HelperController: ObservableObject {
         let width: Int
         let height: Int
 
-        var label: String { "\(width)×\(height)" }
+        var isAuto: Bool { width == 0 && height == 0 }
+        var label: String { isAuto ? "自动（匹配设备）" : "\(width)×\(height)" }
+        var menuLabel: String {
+            isAuto ? label : "\(label)（编码 \(width * 2)×\(height * 2)）"
+        }
     }
 
     static let resolutions: [Resolution] = [
+        Resolution(width: 0, height: 0),
         Resolution(width: 960, height: 600),
         Resolution(width: 1280, height: 720),
         Resolution(width: 1280, height: 800),
@@ -224,12 +229,15 @@ final class HelperController: ObservableObject {
         child.executableURL = helper
         var arguments = ["--mode", mode.rawValue, "--port", "7777", "--fps", "\(fps)"]
         if mode == .extend {
-            arguments += ["--width", "\(resolution.width)", "--height", "\(resolution.height)"]
+            if resolution.isAuto {
+                arguments += ["--auto-size"]
+            } else {
+                arguments += ["--width", "\(resolution.width)", "--height", "\(resolution.height)"]
+            }
         } else {
-            arguments += [
-                "--max-width", "\(resolution.width * 2)",
-                "--max-height", "\(resolution.height * 2)",
-            ]
+            let maxWidth = resolution.isAuto ? 3840 : resolution.width * 2
+            let maxHeight = resolution.isAuto ? 2160 : resolution.height * 2
+            arguments += ["--max-width", "\(maxWidth)", "--max-height", "\(maxHeight)"]
         }
         child.arguments = arguments
         child.standardOutput = logHandle

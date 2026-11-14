@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import CoreGraphics
 import CoreMedia
 import CoreVideo
@@ -22,6 +23,8 @@ public final class HelperApp: @unchecked Sendable {
     private let mode: DisplayMode
     private let pointWidth: Int
     private let pointHeight: Int
+    private let autoSize: Bool
+    private let alreadySized: Bool
     private let dumpFramePath: String?
     private var dumpedFrame = false
     private let recordPath: String?
@@ -46,6 +49,8 @@ public final class HelperApp: @unchecked Sendable {
         mode: DisplayMode = .mirror,
         pointWidth: Int = 1280,
         pointHeight: Int = 800,
+        autoSize: Bool = false,
+        alreadySized: Bool = false,
         dumpFramePath: String? = nil,
         recordPath: String? = nil
     ) {
@@ -58,6 +63,8 @@ public final class HelperApp: @unchecked Sendable {
         self.mode = mode
         self.pointWidth = pointWidth
         self.pointHeight = pointHeight
+        self.autoSize = autoSize
+        self.alreadySized = alreadySized
         self.dumpFramePath = dumpFramePath
         self.recordPath = recordPath
     }
@@ -95,6 +102,9 @@ public final class HelperApp: @unchecked Sendable {
         let server = MirageServer(port: port, config: config)
         server.onKeyframeRequest = { [weak self] in
             self?.requestKeyframe()
+        }
+        server.onHello = { [weak self] hello in
+            self?.handleAutoSize(hello)
         }
         server.onLog = { message in
             print(message)
@@ -180,6 +190,49 @@ public final class HelperApp: @unchecked Sendable {
     private func requestKeyframe() {
         keyframes.request()
         capture?.requestFrame()
+    }
+
+    private func handleAutoSize(_ hello: Hello) {
+        guard mode == .extend, autoSize, !alreadySized else { return }
+
+        let pixelWidth = Int(hello.screenWidth)
+        let pixelHeight = Int(hello.screenHeight)
+        guard pixelWidth > 1, pixelHeight > 1 else { return }
+
+        let targetWidth = max(2, (pixelWidth / 2) & ~1)
+        let targetHeight = max(2, (pixelHeight / 2) & ~1)
+        if abs(targetWidth - pointWidth) <= 2 && abs(targetHeight - pointHeight) <= 2 {
+            return
+        }
+
+        print("extend_resize device=\(pixelWidth)x\(pixelHeight) points=\(targetWidth)x\(targetHeight)")
+        fflush(stdout)
+        relaunch(width: targetWidth, height: targetHeight)
+    }
+
+    private func relaunch(width: Int, height: Int) -> Never {
+        let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        let arguments = CommandLine.arguments
+        var cleaned = [executable]
+        var index = 1
+
+        while index < arguments.count {
+            switch arguments[index] {
+            case "--width", "--height":
+                index += 2
+            case "--auto-size", "--sized":
+                index += 1
+            default:
+                cleaned.append(arguments[index])
+                index += 1
+            }
+        }
+        cleaned += ["--width", "\(width)", "--height", "\(height)", "--sized"]
+
+        var cArguments = cleaned.map { strdup($0) }
+        cArguments.append(nil)
+        execv(executable, &cArguments)
+        exit(1)
     }
 
     private func dumpFirstFrameIfNeeded(_ pixelBuffer: CVPixelBuffer) {

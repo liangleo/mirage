@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
     private var manualDisconnect = false
     private var reconnectAttempts = 0
     private var reconnectRunnable: Runnable? = null
+    private val maxReconnectAttempts = 10
 
     private var connected by mutableStateOf(false)
     private var status by mutableStateOf("未连接")
@@ -107,7 +108,7 @@ class MainActivity : ComponentActivity() {
         lastHost = host
         lastPort = port
         if (!isReconnect) {
-            autoReconnectEnabled = false
+            autoReconnectEnabled = true
             manualDisconnect = false
             reconnectAttempts = 0
         }
@@ -157,6 +158,13 @@ class MainActivity : ComponentActivity() {
                 status = reason
             }
             connected = false
+            return
+        }
+
+        if (reconnectAttempts >= maxReconnectAttempts) {
+            autoReconnectEnabled = false
+            connected = false
+            status = "无法连接（$reason）"
             return
         }
 
