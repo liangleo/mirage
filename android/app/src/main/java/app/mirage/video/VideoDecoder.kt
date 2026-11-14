@@ -198,17 +198,29 @@ class VideoDecoder(
     }
 
     private fun createDecoder(): MediaCodec {
+        val candidates = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { info ->
+            !info.isEncoder && info.supportedTypes.any {
+                it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true)
+            }
+        }
+        val preferred = if (Build.VERSION.SDK_INT >= 29) {
+            candidates.firstOrNull { it.isHardwareAccelerated } ?: candidates.firstOrNull()
+        } else {
+            candidates.firstOrNull()
+        }
+
+        if (preferred == null) {
+            return MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        }
+
+        val hardware = Build.VERSION.SDK_INT >= 29 && preferred.isHardwareAccelerated
+        Log.i("Mirage", "decoder=${preferred.name} hardware=$hardware")
+        stats.setCodecLabel(if (hardware) "HW" else "SW")
         return try {
-            MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            MediaCodec.createByCodecName(preferred.name)
         } catch (error: Exception) {
-            val name = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
-                .firstOrNull { info ->
-                    !info.isEncoder && info.supportedTypes.any {
-                        it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true)
-                    }
-                }
-                ?.name
-            if (name != null) MediaCodec.createByCodecName(name) else throw error
+            Log.w("Mirage", "codec ${preferred.name} unavailable: ${error.message}")
+            MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         }
     }
 

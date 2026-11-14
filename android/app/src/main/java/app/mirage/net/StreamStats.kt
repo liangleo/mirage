@@ -5,7 +5,8 @@ data class StatsSnapshot(
     val decodeMs: Long = 0,
     val bitrateMbps: Double = 0.0,
     val dropped: Int = 0,
-    val e2eMs: Long = -1
+    val e2eMs: Long = -1,
+    val codec: String = ""
 )
 
 class StreamStats {
@@ -21,6 +22,9 @@ class StreamStats {
 
     @Volatile
     private var e2eMs = -1L
+
+    @Volatile
+    private var codecLabel = ""
 
     @Synchronized
     fun onVideo(byteCount: Int, nowMs: Long = System.currentTimeMillis()) {
@@ -44,6 +48,10 @@ class StreamStats {
         e2eMs = value
     }
 
+    fun setCodecLabel(value: String) {
+        codecLabel = value
+    }
+
     @Synchronized
     fun snapshot(nowMs: Long = System.currentTimeMillis()): StatsSnapshot {
         if (lastTickMs == 0L) {
@@ -55,6 +63,6 @@ class StreamStats {
         frames = 0
         bytes = 0
         lastTickMs = nowMs
-        return StatsSnapshot(fps, decodeMs, bitrateMbps, dropped, e2eMs)
+        return StatsSnapshot(fps, decodeMs, bitrateMbps, dropped, e2eMs, codecLabel)
     }
 }

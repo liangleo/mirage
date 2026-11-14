@@ -41,6 +41,14 @@ window.backgroundColor = .systemRed
 window.level = .floating
 window.makeKeyAndOrderFront(nil)
 
+var tick = 0
+let timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+    tick += 1
+    let hue = CGFloat(tick % 100) / 100.0
+    window.backgroundColor = NSColor(hue: hue, saturation: 0.8, brightness: 0.9, alpha: 1)
+}
+_ = timer
+
 print("window screen=\(screen.frame) main=\(CGMainDisplayID())")
 fflush(stdout)
-RunLoop.current.run(until: Date(timeIntervalSinceNow: 8))
+RunLoop.current.run(until: Date(timeIntervalSinceNow: 10))

@@ -109,6 +109,8 @@ final class HelperController: ObservableObject {
     }
 
     static let resolutions: [Resolution] = [
+        Resolution(width: 960, height: 600),
+        Resolution(width: 1280, height: 720),
         Resolution(width: 1280, height: 800),
         Resolution(width: 1600, height: 1000),
         Resolution(width: 1920, height: 1080),

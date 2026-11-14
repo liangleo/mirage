@@ -307,9 +307,10 @@ private fun StreamingScreen(
             } else {
                 ""
             }
+            val codec = if (snapshot.codec.isNotEmpty()) " · ${snapshot.codec}" else ""
             Text(
                 "${snapshot.fps} fps · ${snapshot.decodeMs} ms · " +
-                    "%.1f Mbps · drop ${snapshot.dropped}%s".format(snapshot.bitrateMbps, e2e),
+                    "%.1f Mbps · drop ${snapshot.dropped}%s%s".format(snapshot.bitrateMbps, e2e, codec),
                 color = Color.White
             )
             Text(status, color = Color.White)
