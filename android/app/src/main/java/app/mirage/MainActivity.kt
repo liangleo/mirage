@@ -13,11 +13,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,8 +32,10 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -48,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import app.mirage.net.Hello
@@ -56,7 +56,7 @@ import app.mirage.net.SessionConfig
 import app.mirage.net.StatsSnapshot
 import app.mirage.net.StreamStats
 import app.mirage.net.VideoFrame
-import app.mirage.ui.AspectSurfaceView
+import app.mirage.ui.AspectTextureView
 import app.mirage.ui.VideoView
 import app.mirage.video.VideoDecoder
 import kotlinx.coroutines.delay
@@ -77,7 +77,7 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var pendingKeyframe: VideoFrame? = null
 
-    private var surfaceView: AspectSurfaceView? = null
+    private var surfaceView: AspectTextureView? = null
     private var client: MirageClient? = null
     private val stats = StreamStats()
 
@@ -130,6 +130,7 @@ class MainActivity : ComponentActivity() {
                                 phoneHeight = phoneHeight,
                                 videoWidth = videoWidth,
                                 videoHeight = videoHeight,
+                                onSwipeDown = { toolbarVisible = true },
                                 onSurfaceReady = { view, newSurface ->
                                     surfaceView = view
                                     surface = newSurface
@@ -140,15 +141,6 @@ class MainActivity : ComponentActivity() {
                                     decoder = null
                                     surface = null
                                 }
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .pointerInput(Unit) {
-                                        detectTapGestures {
-                                            toolbarVisible = !toolbarVisible
-                                        }
-                                    }
                             )
                         }
                     } else {
@@ -172,14 +164,10 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    AnimatedVisibility(
-                        visible = toolbarVisible || !connected,
-                        enter = slideInVertically { -it },
-                        exit = slideOutVertically { -it },
-                        modifier = Modifier.align(Alignment.TopCenter)
-                    ) {
+                    if (toolbarVisible || !connected) {
                         Row(
                             modifier = Modifier
+                                .align(Alignment.TopCenter)
                                 .fillMaxWidth()
                                 .background(Color.Black.copy(alpha = 0.6f))
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
@@ -187,23 +175,39 @@ class MainActivity : ComponentActivity() {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconTextButton(
-                                    icon = Icons.Default.Settings,
-                                    label = "设置",
-                                    onClick = { showSettings = true }
-                                )
-                                IconTextButton(
-                                    icon = Icons.Default.Info,
-                                    label = "调试",
-                                    onClick = { showStats = !showStats }
-                                )
+                                IconButton(onClick = { showSettings = true }) {
+                                    Icon(
+                                        Icons.Default.Settings,
+                                        contentDescription = "设置",
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(end = 8.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Info,
+                                        contentDescription = "调试",
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Switch(
+                                        checked = showStats,
+                                        onCheckedChange = { showStats = it },
+                                        modifier = Modifier
+                                            .padding(start = 4.dp)
+                                            .scale(0.8f)
+                                    )
+                                }
                             }
                             if (connected) {
-                                IconTextButton(
-                                    icon = Icons.Default.Close,
-                                    label = "断开",
-                                    onClick = { disconnect() }
-                                )
+                                IconButton(onClick = { disconnect() }) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "断开",
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -383,11 +387,7 @@ class MainActivity : ComponentActivity() {
         val currentSurface = surface ?: return
         if (decoder != null) return
 
-        surfaceView?.apply {
-            holder.setFixedSize(currentConfig.width, currentConfig.height)
-            videoWidth = currentConfig.width
-            videoHeight = currentConfig.height
-        }
+        surfaceView?.applyVideoSize(currentConfig.width, currentConfig.height)
         val newDecoder = VideoDecoder(
             surface = currentSurface,
             config = currentConfig,
@@ -462,19 +462,6 @@ class MainActivity : ComponentActivity() {
             .putString("device_id", bytes.joinToString("") { "%02x".format(it) })
             .apply()
         return bytes
-    }
-}
-
-@Composable
-private fun IconTextButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    onClick: () -> Unit
-) {
-    TextButton(onClick = onClick) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.size(4.dp))
-        Text(label)
     }
 }
 
@@ -561,7 +548,8 @@ private fun StreamingScreen(
     phoneHeight: Int,
     videoWidth: Int,
     videoHeight: Int,
-    onSurfaceReady: (AspectSurfaceView, Surface) -> Unit,
+    onSwipeDown: () -> Unit,
+    onSurfaceReady: (AspectTextureView, Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit
 ) {
     var snapshot by remember { mutableStateOf(StatsSnapshot()) }
@@ -576,6 +564,28 @@ private fun StreamingScreen(
         VideoView(
             onSurfaceReady = onSurfaceReady,
             onSurfaceDestroyed = onSurfaceDestroyed
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    var startY = 0f
+                    var totalDrag = 0f
+                    detectVerticalDragGestures(
+                        onDragStart = { offset ->
+                            startY = offset.y
+                            totalDrag = 0f
+                        },
+                        onVerticalDrag = { _, dragAmount ->
+                            totalDrag += dragAmount
+                        },
+                        onDragEnd = {
+                            if (startY < size.height * 0.2f && totalDrag > 80.dp.toPx()) {
+                                onSwipeDown()
+                            }
+                        }
+                    )
+                }
         )
         if (showStats) {
             Column(
