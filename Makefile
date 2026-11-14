@@ -20,7 +20,7 @@ help:
 	@echo "  make app           打包 build/Mirage.app"
 	@echo "  make test          运行 Mac 与 Android 单元测试"
 	@echo "  make install       安装 App 到 $(INSTALL_DIR)，并安装 APK 到设备"
-	@echo "  make connect       adb 连接 BlueStacks 并设置端口反向转发"
+	@echo "  make connect       adb 连接 Android 设备并设置端口反向转发"
 	@echo "  make run           打开已打包的 Mirage.app"
 	@echo "  make dev           直接从源码运行菜单栏 App"
 	@echo "  make logs          跟踪 helper 日志"
@@ -70,10 +70,12 @@ install-apk: build-android
 	$(ADB) -s $$DEV install -r $(ANDROID)/app/build/outputs/apk/debug/app-debug.apk
 
 connect:
-	@$(ADB) connect 127.0.0.1:5555 >/dev/null 2>&1 || true
 	@DEV="$(DEVICE)"; \
 	if [ -z "$$DEV" ]; then DEV=$$($(ADB) devices | awk 'NR>1 && $$2=="device" {print $$1; exit}'); fi; \
-	if [ -z "$$DEV" ]; then echo "没有已连接设备"; exit 1; fi; \
+	if [ -z "$$DEV" ]; then \
+		echo "没有已连接的 Android 设备（USB 调试请确认已开启；BlueStacks 可先执行 adb connect 127.0.0.1:5555）"; \
+		exit 1; \
+	fi; \
 	$(ADB) -s $$DEV reverse tcp:7777 tcp:7777 && echo "adb reverse 已设置 ($$DEV)"
 
 run: app

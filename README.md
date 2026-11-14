@@ -12,7 +12,7 @@ make build     # 构建 Mac 与 Android
 make test      # 两端单元测试
 make app       # 打包 build/Mirage.app
 make run       # 打开打包好的 App
-make connect   # adb 连接 BlueStacks 并设置 reverse
+make connect   # adb 连接 Android 设备并设置 reverse
 make install   # 安装 App 到 /Applications，并安装 APK 到设备
 make clean     # 清理构建产物
 ```
