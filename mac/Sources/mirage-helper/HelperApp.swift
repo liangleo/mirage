@@ -1,8 +1,16 @@
 import Foundation
 import CoreGraphics
 import CoreMedia
+import CoreVideo
+import CoreImage
+import ImageIO
 import MirageCore
 import MirageHelper
+
+public enum DisplayMode: String {
+    case mirror
+    case extend
+}
 
 public final class HelperApp: @unchecked Sendable {
     private let displayID: CGDirectDisplayID
@@ -11,6 +19,14 @@ public final class HelperApp: @unchecked Sendable {
     private let bitrate: Int
     private let maxWidth: Int
     private let maxHeight: Int
+    private let mode: DisplayMode
+    private let pointWidth: Int
+    private let pointHeight: Int
+    private let dumpFramePath: String?
+    private var dumpedFrame = false
+    private let recordPath: String?
+    private var recordHandle: FileHandle?
+    private var virtualDisplay: VirtualDisplay?
 
     private let keyframes = KeyframeController()
     private let statsLock = NSLock()
@@ -26,7 +42,12 @@ public final class HelperApp: @unchecked Sendable {
         fps: Int,
         bitrate: Int,
         maxWidth: Int = 3840,
-        maxHeight: Int = 2160
+        maxHeight: Int = 2160,
+        mode: DisplayMode = .mirror,
+        pointWidth: Int = 1280,
+        pointHeight: Int = 800,
+        dumpFramePath: String? = nil,
+        recordPath: String? = nil
     ) {
         self.displayID = displayID
         self.port = port
@@ -34,14 +55,30 @@ public final class HelperApp: @unchecked Sendable {
         self.bitrate = bitrate
         self.maxWidth = maxWidth
         self.maxHeight = maxHeight
+        self.mode = mode
+        self.pointWidth = pointWidth
+        self.pointHeight = pointHeight
+        self.dumpFramePath = dumpFramePath
+        self.recordPath = recordPath
     }
 
     public func run() async throws {
-        guard let capturedSize = captureSize(for: displayID) else {
-            throw HelperAppError.invalidDisplay(displayID)
+        var targetDisplayID = displayID
+
+        if mode == .extend {
+            targetDisplayID = try makeVirtualDisplay()
+        }
+
+        if let recordPath {
+            FileManager.default.createFile(atPath: recordPath, contents: nil)
+            recordHandle = FileHandle(forWritingAtPath: recordPath)
+        }
+
+        guard let capturedSize = captureSize(for: targetDisplayID) else {
+            throw HelperAppError.invalidDisplay(targetDisplayID)
         }
         let size = fittedCaptureSize(capturedSize, maxWidth: maxWidth, maxHeight: maxHeight)
-        print("display=\(displayID) capture=\(size.width)x\(size.height) source=\(capturedSize.width)x\(capturedSize.height)")
+        print("display=\(targetDisplayID) capture=\(size.width)x\(size.height) source=\(capturedSize.width)x\(capturedSize.height) mode=\(mode.rawValue)")
         fflush(stdout)
 
         let encoder = try VideoEncoder(width: size.width, height: size.height, fps: fps, bitrate: bitrate)
@@ -70,11 +107,13 @@ public final class HelperApp: @unchecked Sendable {
                 self?.keyframes.noteKeyframe(nowMicros: frame.header.captureTimestampMicros)
             }
             self?.recordStats(frame)
+            self?.recordHandle?.write(frame.data)
             server?.broadcast(frame)
         }
 
         let capture = DisplayCapture(displayID: displayID, fps: fps, size: size) { [weak self] pixelBuffer, micros in
             guard let self, let encoder = self.encoder else { return }
+            self.dumpFirstFrameIfNeeded(pixelBuffer)
             let forceKeyframe = self.keyframes.shouldForce(nowMicros: micros)
             let pts = CMTime(value: Int64(micros), timescale: 1_000_000)
             do {
@@ -95,11 +134,79 @@ public final class HelperApp: @unchecked Sendable {
         try? await capture?.stop()
         encoder?.finish()
         server?.stop()
+        virtualDisplay?.destroy()
+        virtualDisplay = nil
+    }
+
+    private func makeVirtualDisplay() throws -> CGDirectDisplayID {
+        do {
+            let created = try VirtualDisplay(
+                pointWidth: pointWidth,
+                pointHeight: pointHeight,
+                name: "Mirage"
+            )
+            if waitForDisplay(created.displayID, timeout: 2.0) {
+                virtualDisplay = created
+                print("extend display=\(created.displayID) points=\(pointWidth)x\(pointHeight)")
+                fflush(stdout)
+                return created.displayID
+            }
+            print("extend_fallback=not_online")
+            fflush(stdout)
+            created.destroy()
+            return displayID
+        } catch {
+            print("extend_fallback=create_failed")
+            fflush(stdout)
+            return displayID
+        }
+    }
+
+    private func waitForDisplay(_ id: CGDirectDisplayID, timeout: TimeInterval) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            var count: UInt32 = 0
+            CGGetActiveDisplayList(0, nil, &count)
+            var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+            CGGetActiveDisplayList(count, &ids, &count)
+            if ids.contains(id), captureSize(for: id) != nil {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return false
     }
 
     private func requestKeyframe() {
         keyframes.request()
         capture?.requestFrame()
+    }
+
+    private func dumpFirstFrameIfNeeded(_ pixelBuffer: CVPixelBuffer) {
+        guard let path = dumpFramePath else { return }
+
+        statsLock.lock()
+        if dumpedFrame {
+            statsLock.unlock()
+            return
+        }
+        dumpedFrame = true
+        statsLock.unlock()
+
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(image, from: image.extent) else { return }
+        let url = URL(fileURLWithPath: path)
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL,
+            "public.png" as CFString,
+            1,
+            nil
+        ) else { return }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        CGImageDestinationFinalize(destination)
+        print("dumped_frame=\(path)")
+        fflush(stdout)
     }
 
     private func recordStats(_ frame: EncodedFrame) {

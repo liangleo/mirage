@@ -19,7 +19,13 @@ swift test
 swift run mirage-helper --list-displays
 swift run mirage-helper --display 1 --port 7777 --fps 60 --bitrate 20000000
 swift run mirage-helper --max-width 1920 --max-height 1080
+swift run mirage-helper --mode extend
+swift run mirage-helper --mode extend --width 1280 --height 800
 ```
+
+默认镜像主屏；`--mode extend` 创建一块虚拟显示器并推流它（在系统设置的显示器里可见）。
+虚拟屏尺寸以点为单位，默认 1280×800（HiDPI 下编码 2560×1600）。
+调试：`--dump-frame <png>` 保存第一帧原始画面，`--record <h264>` 保存发送的 Annex-B 码流。
 
 默认捕获主显示器；超过 `--max-width/--max-height`（默认 3840×2160）的屏幕会等比缩放。
 运行时每 60 帧打印一次 `stats encode_frames=… avg_encode_ms=…`。

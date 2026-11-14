@@ -57,7 +57,8 @@ public final class MirageServer: @unchecked Sendable {
             guard let self, let connection = self.connection else { return }
 
             let wasWaiting = self.sender.isWaitingForKeyframe
-            guard self.sender.enqueue(encoded) else {
+            let accepted = self.sender.enqueue(encoded)
+            guard accepted else {
                 if !wasWaiting && self.sender.isWaitingForKeyframe {
                     self.onKeyframeRequest?()
                 }

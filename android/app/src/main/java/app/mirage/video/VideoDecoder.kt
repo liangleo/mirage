@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
+import android.util.Log
 import android.view.Surface
 import app.mirage.net.SessionConfig
 import app.mirage.net.StreamStats
@@ -29,8 +30,10 @@ class VideoDecoder(
 
     private var codec: MediaCodec? = null
     private var initFailures = 0
+    private var outputs = 0
 
     fun start() {
+        Log.i("Mirage", "decoder.start")
         handler.post { loop() }
     }
 
@@ -65,6 +68,7 @@ class VideoDecoder(
             }
         }
         if (!running || firstKeyframe == null) return
+        Log.i("Mirage", "first keyframe bytes=${firstKeyframe.annexB.size}")
 
         try {
             configureDecoder(firstKeyframe.annexB)
@@ -161,6 +165,7 @@ class VideoDecoder(
         }
 
         val (sps, pps) = AnnexB.parameterSets(firstKeyframe)
+        Log.i("Mirage", "configure ${config.width}x${config.height} sps=${sps?.size ?: -1} pps=${pps?.size ?: -1}")
         if (sps != null) format.setByteBuffer("csd-0", ByteBuffer.wrap(sps))
         if (pps != null) format.setByteBuffer("csd-1", ByteBuffer.wrap(pps))
 
@@ -177,6 +182,10 @@ class VideoDecoder(
             val index = decoder.dequeueOutputBuffer(info, 0)
             when {
                 index >= 0 -> {
+                    if (outputs == 0) {
+                        Log.i("Mirage", "first output pts=${info.presentationTimeUs} size=${info.size}")
+                    }
+                    outputs++
                     submittedAtNanos.remove(info.presentationTimeUs)?.let { startedAt ->
                         stats.setDecodeMs((SystemClock.elapsedRealtimeNanos() - startedAt) / 1_000_000)
                     }

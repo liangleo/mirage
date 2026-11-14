@@ -51,6 +51,9 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var config: SessionConfig? = null
 
+    @Volatile
+    private var pendingKeyframe: VideoFrame? = null
+
     private var surfaceView: AspectSurfaceView? = null
     private var client: MirageClient? = null
     private val stats = StreamStats()
@@ -105,7 +108,12 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun onVideo(frame: VideoFrame) {
-                decoder?.submit(frame)
+                val currentDecoder = decoder
+                if (currentDecoder != null) {
+                    currentDecoder.submit(frame)
+                } else if (frame.header.flags and 1 != 0) {
+                    pendingKeyframe = frame
+                }
             }
 
             override fun onClosed(reason: String) {
@@ -128,6 +136,7 @@ class MainActivity : ComponentActivity() {
         decoder?.release()
         decoder = null
         config = null
+        pendingKeyframe = null
         surface = null
         surfaceView = null
         connected = false
@@ -152,6 +161,10 @@ class MainActivity : ComponentActivity() {
         )
         decoder = newDecoder
         newDecoder.start()
+        pendingKeyframe?.let {
+            newDecoder.submit(it)
+            pendingKeyframe = null
+        }
         client?.requestKeyframe()
     }
 

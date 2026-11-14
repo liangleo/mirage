@@ -10,7 +10,12 @@ let package = Package(
     ],
     targets: [
         .target(name: "MirageCore"),
-        .target(name: "MirageHelper", dependencies: ["MirageCore"]),
+        .target(
+            name: "CGVirtualDisplayBridge",
+            path: "Sources/CGVirtualDisplayBridge",
+            publicHeadersPath: "include"
+        ),
+        .target(name: "MirageHelper", dependencies: ["MirageCore", "CGVirtualDisplayBridge"]),
         .executableTarget(
             name: "MirageHelperCLI",
             dependencies: ["MirageHelper", "MirageCore"],

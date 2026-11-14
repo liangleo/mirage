@@ -71,6 +71,11 @@ if arguments.contains("--list-displays") {
     let bitrate = argumentValue("--bitrate").flatMap { Int($0) } ?? 20_000_000
     let maxWidth = argumentValue("--max-width").flatMap { Int($0) } ?? 3840
     let maxHeight = argumentValue("--max-height").flatMap { Int($0) } ?? 2160
+    let mode = DisplayMode(rawValue: argumentValue("--mode") ?? "mirror") ?? .mirror
+    let pointWidth = argumentValue("--width").flatMap { Int($0) } ?? 1280
+    let pointHeight = argumentValue("--height").flatMap { Int($0) } ?? 800
+    let dumpFramePath = argumentValue("--dump-frame")
+    let recordPath = argumentValue("--record")
 
     let app = HelperApp(
         displayID: displayID,
@@ -78,7 +83,12 @@ if arguments.contains("--list-displays") {
         fps: fps,
         bitrate: bitrate,
         maxWidth: maxWidth,
-        maxHeight: maxHeight
+        maxHeight: maxHeight,
+        mode: mode,
+        pointWidth: pointWidth,
+        pointHeight: pointHeight,
+        dumpFramePath: dumpFramePath,
+        recordPath: recordPath
     )
     let box = ErrorBox()
     let startSemaphore = DispatchSemaphore(value: 0)
