@@ -56,6 +56,13 @@ struct MenuContent: View {
                 }
             }
         }
+        Menu("帧率：\(controller.fps) fps") {
+            ForEach(HelperController.frameRates, id: \.self) { fps in
+                Button((controller.fps == fps ? "✓ " : "") + "\(fps) fps") {
+                    controller.setFPS(fps)
+                }
+            }
+        }
         Divider()
         Button(controller.isRunning ? "停止" : "启动") {
             controller.toggle()
@@ -97,8 +104,11 @@ final class HelperController: ObservableObject {
         Resolution(width: 1920, height: 1200),
     ]
 
+    static let frameRates = [30, 60, 90, 120]
+
     @Published private(set) var mode: Mode
     @Published private(set) var resolution: Resolution
+    @Published private(set) var fps: Int
     @Published private(set) var isRunning = false
     @Published private(set) var status = "未运行"
 
@@ -116,6 +126,9 @@ final class HelperController: ObservableObject {
         resolution = Self.resolutions.contains(savedResolution)
             ? savedResolution
             : Self.resolutions[0]
+
+        let savedFPS = UserDefaults.standard.integer(forKey: "fps")
+        fps = Self.frameRates.contains(savedFPS) ? savedFPS : 60
 
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/Mirage", isDirectory: true)
@@ -137,6 +150,15 @@ final class HelperController: ObservableObject {
         resolution = newResolution
         UserDefaults.standard.set(newResolution.width, forKey: "resolutionWidth")
         UserDefaults.standard.set(newResolution.height, forKey: "resolutionHeight")
+        if isRunning {
+            restart()
+        }
+    }
+
+    func setFPS(_ newFPS: Int) {
+        guard newFPS != fps else { return }
+        fps = newFPS
+        UserDefaults.standard.set(newFPS, forKey: "fps")
         if isRunning {
             restart()
         }
@@ -166,7 +188,7 @@ final class HelperController: ObservableObject {
 
         let child = Process()
         child.executableURL = helper
-        var arguments = ["--mode", mode.rawValue, "--port", "7777"]
+        var arguments = ["--mode", mode.rawValue, "--port", "7777", "--fps", "\(fps)"]
         if mode == .extend {
             arguments += ["--width", "\(resolution.width)", "--height", "\(resolution.height)"]
         } else {
@@ -196,7 +218,7 @@ final class HelperController: ObservableObject {
 
         process = child
         isRunning = true
-        status = "运行中 · \(mode.title)"
+        status = "运行中 · \(mode.title) · \(fps)fps"
     }
 
     func stop() {

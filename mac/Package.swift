@@ -20,7 +20,7 @@ let package = Package(
         .executableTarget(
             name: "MirageHelperCLI",
             dependencies: ["MirageHelper", "MirageCore"],
-            path: "Sources/mirage-helper"
+            path: "Sources/MirageHelperCLI"
         ),
         .executableTarget(
             name: "MirageMenu",

@@ -4,6 +4,21 @@
 
 当前阶段：M0–M1（镜像显示，不做输入）。设计与计划见 `docs/`（过程文档，验收后统一提交）。
 
+## 常用命令（Makefile）
+
+```bash
+make init      # 检查工具链，初始化 Android SDK 配置
+make build     # 构建 Mac 与 Android
+make test      # 两端单元测试
+make app       # 打包 build/Mirage.app
+make run       # 打开打包好的 App
+make connect   # adb 连接 BlueStacks 并设置 reverse
+make install   # 安装 App 到 /Applications，并安装 APK 到设备
+make clean     # 清理构建产物
+```
+
+`make help` 查看全部命令；`INSTALL_DIR=~/Applications make install` 可改安装位置。
+
 ## 结构
 
 - `protocol/`：帧格式、消息定义与跨语言测试向量
@@ -52,6 +67,7 @@ open build/Mirage.app
 
 - **副屏（虚拟显示器）** / **镜像主屏**：切换模式（会重启 helper 子进程；从副屏切回镜像时虚拟屏随旧进程退出消失）
 - **分辨率**：1280×800 / 1600×1000 / 1920×1080（4K）/ 1920×1200（HiDPI 2x 编码，副屏会按该尺寸建虚拟屏；镜像模式用作编码上限），切换会重启 helper
+- **帧率**：30 / 60 / 90 / 120 fps，切换会重启 helper
 - **启动 / 停止**
 - **打开日志**：`~/Library/Logs/Mirage/helper.log`
 - **退出 Mirage**：同时结束 helper
