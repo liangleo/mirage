@@ -10,11 +10,18 @@ import android.view.Surface
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -34,7 +41,6 @@ import app.mirage.net.StatsSnapshot
 import app.mirage.net.StreamStats
 import app.mirage.net.VideoFrame
 import app.mirage.ui.AspectSurfaceView
-import app.mirage.ui.ConnectScreen
 import app.mirage.ui.VideoView
 import app.mirage.video.VideoDecoder
 import kotlinx.coroutines.delay
@@ -59,6 +65,8 @@ class MainActivity : ComponentActivity() {
     private var client: MirageClient? = null
     private val stats = StreamStats()
 
+    private var savedHost = ""
+    private var savedPort = 0
     private var lastHost: String? = null
     private var lastPort: Int = 0
     private var autoReconnectEnabled = false
@@ -69,33 +77,90 @@ class MainActivity : ComponentActivity() {
 
     private var connected by mutableStateOf(false)
     private var status by mutableStateOf("未连接")
+    private var showSettings by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val preferences = getSharedPreferences("mirage", Context.MODE_PRIVATE)
+        savedHost = preferences.getString("host", "") ?: ""
+        savedPort = preferences.getInt("port", 0)
+        val configured = savedHost.isNotBlank() && savedPort > 0
+        if (!configured) {
+            status = "请先设置 Mac 地址"
+            showSettings = true
+        }
+
         setContent {
             MaterialTheme {
-                if (connected) {
-                    StreamingScreen(
-                        stats = stats,
-                        status = status,
-                        onSurfaceReady = { view, newSurface ->
-                            surfaceView = view
-                            surface = newSurface
-                            maybeStartDecoder()
-                        },
-                        onSurfaceDestroyed = {
-                            decoder?.release()
-                            decoder = null
-                            surface = null
-                        },
-                        onDisconnect = { disconnect() }
+                Box(modifier = Modifier.fillMaxSize()) {
+                    if (connected) {
+                        StreamingScreen(
+                            stats = stats,
+                            status = status,
+                            onSurfaceReady = { view, newSurface ->
+                                surfaceView = view
+                                surface = newSurface
+                                maybeStartDecoder()
+                            },
+                            onSurfaceDestroyed = {
+                                decoder?.release()
+                                decoder = null
+                                surface = null
+                            }
+                        )
+                    } else {
+                        DisconnectedScreen(
+                            status = status,
+                            onConnect = {
+                                if (savedHost.isNotBlank() && savedPort > 0) {
+                                    connect(savedHost, savedPort)
+                                } else {
+                                    showSettings = true
+                                }
+                            }
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(onClick = { showSettings = true }) {
+                            Text("设置")
+                        }
+                        if (connected) {
+                            TextButton(onClick = { disconnect() }) {
+                                Text("断开")
+                            }
+                        }
+                    }
+                }
+
+                if (showSettings) {
+                    SettingsDialog(
+                        initialHost = savedHost.ifBlank { "127.0.0.1" },
+                        initialPort = if (savedPort > 0) savedPort.toString() else "7777",
+                        onDismiss = { showSettings = false },
+                        onSave = { host, port ->
+                            savedHost = host
+                            savedPort = port
+                            preferences.edit()
+                                .putString("host", host)
+                                .putInt("port", port)
+                                .apply()
+                            showSettings = false
+                            connect(host, port)
+                        }
                     )
-                } else {
-                    ConnectScreen(status = status, onConnect = { host, port ->
-                        connect(host, port)
-                    })
                 }
             }
+        }
+
+        if (configured) {
+            connect(savedHost, savedPort)
         }
     }
 
@@ -285,12 +350,85 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+private fun DisconnectedScreen(status: String, onConnect: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("Mirage", style = MaterialTheme.typography.headlineMedium)
+        Spacer(Modifier.height(16.dp))
+        Text(status)
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onConnect) {
+            Text("连接")
+        }
+    }
+}
+
+@Composable
+private fun SettingsDialog(
+    initialHost: String,
+    initialPort: String,
+    onDismiss: () -> Unit,
+    onSave: (String, Int) -> Unit
+) {
+    var host by remember { mutableStateOf(initialHost) }
+    var port by remember { mutableStateOf(initialPort) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("连接设置") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = host,
+                    onValueChange = { host = it },
+                    label = { Text("Mac 地址") },
+                    singleLine = true
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = port,
+                    onValueChange = { port = it },
+                    label = { Text("端口") },
+                    singleLine = true
+                )
+                error?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val parsedPort = port.toIntOrNull()
+                if (host.isBlank() || parsedPort == null || parsedPort <= 0) {
+                    error = "地址或端口无效"
+                } else {
+                    onSave(host.trim(), parsedPort)
+                }
+            }) {
+                Text("保存并连接")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
 private fun StreamingScreen(
     stats: StreamStats,
     status: String,
     onSurfaceReady: (AspectSurfaceView, Surface) -> Unit,
-    onSurfaceDestroyed: () -> Unit,
-    onDisconnect: () -> Unit
+    onSurfaceDestroyed: () -> Unit
 ) {
     var snapshot by remember { mutableStateOf(StatsSnapshot()) }
     LaunchedEffect(Unit) {
@@ -323,14 +461,6 @@ private fun StreamingScreen(
                 color = Color.White
             )
             Text(status, color = Color.White)
-        }
-        TextButton(
-            onClick = onDisconnect,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(16.dp)
-        ) {
-            Text("断开")
         }
     }
 }
