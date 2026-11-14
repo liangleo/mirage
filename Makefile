@@ -5,7 +5,10 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 MAC := $(ROOT)/mac
 ANDROID := $(ROOT)/android
 APP := $(ROOT)/build/Mirage.app
-JAVA_HOME ?= $(firstword $(wildcard $(HOME)/Library/Java/JavaVirtualMachines/*17*/Contents/Home /Library/Java/JavaVirtualMachines/*17*/Contents/Home))
+JAVA_HOME ?=
+JDK17 := $(firstword $(wildcard $(HOME)/Library/Java/JavaVirtualMachines/*17*/Contents/Home /Library/Java/JavaVirtualMachines/*17*/Contents/Home))
+JDK21 := $(firstword $(wildcard $(HOME)/Library/Java/JavaVirtualMachines/*21*/Contents/Home /Library/Java/JavaVirtualMachines/*21*/Contents/Home))
+GRADLE_JAVA_HOME := $(if $(JDK17),$(JDK17),$(if $(JDK21),$(JDK21),$(JAVA_HOME)))
 ANDROID_HOME ?=
 ADB ?= adb
 INSTALL_DIR ?= /Applications
@@ -29,7 +32,7 @@ help:
 init:
 	@command -v swift >/dev/null || { echo "缺少 Swift/Xcode 命令行工具"; exit 1; }
 	@command -v ffmpeg >/dev/null || echo "提示: 未找到 ffmpeg（仅生成测试码流时需要）"
-	@if [ -z "$(JAVA_HOME)" ]; then echo "未找到 JDK 17，请安装并设置 JAVA_HOME"; else echo "JAVA_HOME=$(JAVA_HOME)"; fi
+	@if [ -z "$(GRADLE_JAVA_HOME)" ]; then echo "未找到 JDK 17/21，请安装并设置 JAVA_HOME"; else echo "Gradle JDK: $(GRADLE_JAVA_HOME)"; fi
 	@if [ ! -f $(ANDROID)/local.properties ] && [ -n "$(ANDROID_HOME)" ]; then \
 		echo "sdk.dir=$(ANDROID_HOME)" > $(ANDROID)/local.properties; \
 		echo "已写入 android/local.properties"; \
@@ -44,14 +47,14 @@ build-mac:
 	cd $(MAC) && swift build
 
 build-android:
-	cd $(ANDROID) && JAVA_HOME="$(JAVA_HOME)" ./gradlew :app:assembleDebug
+	cd $(ANDROID) && JAVA_HOME="$(GRADLE_JAVA_HOME)" ./gradlew :app:assembleDebug
 
 app:
 	bash $(ROOT)/tools/build_app.sh
 
 test:
 	cd $(MAC) && swift test
-	cd $(ANDROID) && JAVA_HOME="$(JAVA_HOME)" ./gradlew :app:testDebugUnitTest
+	cd $(ANDROID) && JAVA_HOME="$(GRADLE_JAVA_HOME)" ./gradlew :app:testDebugUnitTest
 
 clean:
 	cd $(MAC) && swift package clean
