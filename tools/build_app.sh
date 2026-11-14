@@ -10,9 +10,11 @@ BIN="$(swift build -c release --product mirage-menu --show-bin-path)"
 swift build -c release --product mirage-helper
 swift build -c release --product mirage-menu
 
-APP="$ROOT/build/Mirage.app"
+APP="$ROOT/build/.Mirage.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# Keep the dev bundle out of Spotlight so only the installed app is searchable.
+touch "$ROOT/build/.metadata_never_index"
 
 cp "$BIN/mirage-menu" "$APP/Contents/MacOS/Mirage"
 cp "$BIN/mirage-helper" "$APP/Contents/MacOS/mirage-helper"
@@ -42,6 +44,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
+    <true/>
+    <key>LSMultipleInstancesProhibited</key>
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>

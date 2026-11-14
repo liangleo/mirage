@@ -4,6 +4,25 @@ import MirageCore
 
 public enum ServerError: Error {
     case invalidPort(UInt16)
+    case notReady
+    case failed(Error)
+}
+
+private final class StartResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var error: Error?
+
+    func set(_ error: Error) {
+        lock.lock()
+        self.error = error
+        lock.unlock()
+    }
+
+    func get() -> Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return error
+    }
 }
 
 public final class MirageServer: @unchecked Sendable {
@@ -33,14 +52,38 @@ public final class MirageServer: @unchecked Sendable {
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: 0)
 
         let listener = try NWListener(using: parameters, on: nwPort)
+        let ready = DispatchSemaphore(value: 0)
+        let startResult = StartResult()
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
         listener.stateUpdateHandler = { [weak self] state in
             self?.onLog?("listener state=\(state)")
+            switch state {
+            case .ready:
+                ready.signal()
+            case .failed(let error):
+                startResult.set(error)
+                ready.signal()
+            case .cancelled:
+                ready.signal()
+            default:
+                break
+            }
         }
         self.listener = listener
         listener.start(queue: queue)
+
+        if ready.wait(timeout: .now() + 5) == .timedOut {
+            listener.cancel()
+            self.listener = nil
+            throw ServerError.notReady
+        }
+        if let error = startResult.get() {
+            listener.cancel()
+            self.listener = nil
+            throw ServerError.failed(error)
+        }
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1.0, repeating: 1.0)

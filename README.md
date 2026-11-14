@@ -10,7 +10,7 @@
 make init      # 检查工具链，初始化 Android SDK 配置
 make build     # 构建 Mac 与 Android
 make test      # 两端单元测试
-make app       # 打包 build/Mirage.app
+make app       # 打包 build/.Mirage.app（隐藏，避免 Spotlight 出现两个 App）
 make run       # 打开打包好的 App
 make connect   # adb 连接 Android 设备并设置 reverse
 make install   # 安装 App 到 /Applications，并安装 APK 到设备
@@ -69,8 +69,10 @@ swift run mirage-helper --mode extend --width 1280 --height 800
 
 ```bash
 bash tools/build_app.sh
-open build/Mirage.app
+open build/.Mirage.app
 ```
+
+开发包放在隐藏路径 `build/.Mirage.app`，避免和 `/Applications/Mirage.app` 一起出现在 Spotlight。App 是单实例的：重复启动会直接退出；helper 发现 7777 被占用时会报错退出，不会静默变成镜像。
 
 菜单栏会出现显示器图标，菜单里可以：
 

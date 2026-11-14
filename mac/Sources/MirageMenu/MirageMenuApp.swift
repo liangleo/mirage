@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Darwin
 
 @main
 struct MirageMenuApp: App {
@@ -19,6 +20,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard HelperController.shared.acquireInstanceLock() else {
+            NSApplication.shared.terminate(nil)
+            return
+        }
+
         let arguments = CommandLine.arguments
         if let index = arguments.firstIndex(of: "--autostart"),
            index + 1 < arguments.count,
@@ -115,6 +121,7 @@ final class HelperController: ObservableObject {
     let logURL: URL
 
     private var process: Process?
+    private var instanceLockFD: Int32 = -1
 
     private init() {
         let savedMode = UserDefaults.standard.string(forKey: "mode").flatMap(Mode.init(rawValue:)) ?? .extend
@@ -134,6 +141,26 @@ final class HelperController: ObservableObject {
             .appendingPathComponent("Logs/Mirage", isDirectory: true)
         try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         logURL = logs.appendingPathComponent("helper.log")
+    }
+
+    func acquireInstanceLock() -> Bool {
+        guard instanceLockFD < 0 else { return true }
+
+        let support = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("Mirage", isDirectory: true)
+        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        let path = support.appendingPathComponent("menu.lock").path
+
+        let fd = open(path, O_CREAT | O_RDWR, 0o644)
+        if fd < 0 { return true }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            close(fd)
+            return false
+        }
+        instanceLockFD = fd
+        return true
     }
 
     func setMode(_ newMode: Mode) {
