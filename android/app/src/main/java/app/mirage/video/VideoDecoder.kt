@@ -5,20 +5,24 @@ import android.media.MediaFormat
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.view.Surface
 import app.mirage.net.SessionConfig
+import app.mirage.net.StreamStats
 import app.mirage.net.VideoFrame
 import java.nio.ByteBuffer
 
 class VideoDecoder(
     private val surface: Surface,
     private val config: SessionConfig,
+    private val stats: StreamStats,
     private val onError: (String) -> Unit,
     private val onNeedKeyframe: () -> Unit = {}
 ) {
     private val thread = HandlerThread("mirage-decoder").apply { start() }
     private val handler = Handler(thread.looper)
     private val queue = DecodeQueue(capacity = 4)
+    private val submittedAtNanos = HashMap<Long, Long>()
 
     @Volatile
     private var running = true
@@ -31,8 +35,8 @@ class VideoDecoder(
     }
 
     fun submit(frame: VideoFrame) {
-        if (running) {
-            queue.offer(frame)
+        if (running && queue.offer(frame)) {
+            stats.onDropped()
         }
     }
 
@@ -100,6 +104,7 @@ class VideoDecoder(
                     frame.header.captureTimestampMicros,
                     0
                 )
+                submittedAtNanos[frame.header.captureTimestampMicros] = SystemClock.elapsedRealtimeNanos()
                 pending = null
             } catch (error: Exception) {
                 onError("decode failed: ${error.message}")
@@ -121,6 +126,7 @@ class VideoDecoder(
         }
         codec = null
         queue.clear()
+        submittedAtNanos.clear()
         onNeedKeyframe()
         if (running) {
             handler.post { loop() }
@@ -170,7 +176,12 @@ class VideoDecoder(
             val decoder = codec ?: return
             val index = decoder.dequeueOutputBuffer(info, 0)
             when {
-                index >= 0 -> decoder.releaseOutputBuffer(index, true)
+                index >= 0 -> {
+                    submittedAtNanos.remove(info.presentationTimeUs)?.let { startedAt ->
+                        stats.setDecodeMs((SystemClock.elapsedRealtimeNanos() - startedAt) / 1_000_000)
+                    }
+                    decoder.releaseOutputBuffer(index, true)
+                }
                 index == MediaCodec.INFO_TRY_AGAIN_LATER -> return
                 index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                 else -> return

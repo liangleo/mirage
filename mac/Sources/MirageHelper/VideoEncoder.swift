@@ -7,10 +7,12 @@ import MirageCore
 public struct EncodedFrame {
     public let header: VideoHeader
     public let data: Data
+    public let encodeLatencyMicros: UInt64
 
-    public init(header: VideoHeader, data: Data) {
+    public init(header: VideoHeader, data: Data, encodeLatencyMicros: UInt64 = 0) {
         self.header = header
         self.data = data
+        self.encodeLatencyMicros = encodeLatencyMicros
     }
 }
 
@@ -134,7 +136,9 @@ public final class VideoEncoder: @unchecked Sendable {
             captureTimestampMicros: micros,
             reserved: 0
         )
-        onFrame?(EncodedFrame(header: header, data: data))
+        let now = monotonicMicros()
+        let encodeLatency = now >= micros ? now - micros : 0
+        onFrame?(EncodedFrame(header: header, data: data, encodeLatencyMicros: encodeLatency))
     }
 
     private func isNotSync(_ sampleBuffer: CMSampleBuffer) -> Bool {

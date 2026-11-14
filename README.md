@@ -18,9 +18,12 @@ cd mac
 swift test
 swift run mirage-helper --list-displays
 swift run mirage-helper --display 1 --port 7777 --fps 60 --bitrate 20000000
+swift run mirage-helper --max-width 1920 --max-height 1080
 ```
 
-默认捕获主显示器；超过 3840×2160 的屏幕会等比缩到该上限（硬件 H.264 编码限制）。
+默认捕获主显示器；超过 `--max-width/--max-height`（默认 3840×2160）的屏幕会等比缩放。
+运行时每 60 帧打印一次 `stats encode_frames=… avg_encode_ms=…`。
+Android 端连接后左上角显示 fps、解码耗时、码率、丢帧和估算端到端延迟。
 首次捕获需要「屏幕录制」授权，授权对象是运行命令的终端 App。
 
 验证推流（另开终端，窗口保持有画面变化）：

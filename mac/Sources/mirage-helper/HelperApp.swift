@@ -9,24 +9,38 @@ public final class HelperApp: @unchecked Sendable {
     private let port: UInt16
     private let fps: Int
     private let bitrate: Int
+    private let maxWidth: Int
+    private let maxHeight: Int
 
     private let keyframes = KeyframeController()
+    private let statsLock = NSLock()
+    private var encodedFrames = 0
+    private var encodeLatencySum: UInt64 = 0
     private var encoder: VideoEncoder?
     private var capture: DisplayCapture?
     private var server: MirageServer?
 
-    public init(displayID: CGDirectDisplayID, port: UInt16, fps: Int, bitrate: Int) {
+    public init(
+        displayID: CGDirectDisplayID,
+        port: UInt16,
+        fps: Int,
+        bitrate: Int,
+        maxWidth: Int = 3840,
+        maxHeight: Int = 2160
+    ) {
         self.displayID = displayID
         self.port = port
         self.fps = fps
         self.bitrate = bitrate
+        self.maxWidth = maxWidth
+        self.maxHeight = maxHeight
     }
 
     public func run() async throws {
         guard let capturedSize = captureSize(for: displayID) else {
             throw HelperAppError.invalidDisplay(displayID)
         }
-        let size = fittedCaptureSize(capturedSize, maxWidth: 3840, maxHeight: 2160)
+        let size = fittedCaptureSize(capturedSize, maxWidth: maxWidth, maxHeight: maxHeight)
         print("display=\(displayID) capture=\(size.width)x\(size.height) source=\(capturedSize.width)x\(capturedSize.height)")
         fflush(stdout)
 
@@ -55,6 +69,7 @@ public final class HelperApp: @unchecked Sendable {
             if frame.header.flags & 1 == 1 {
                 self?.keyframes.noteKeyframe(nowMicros: frame.header.captureTimestampMicros)
             }
+            self?.recordStats(frame)
             server?.broadcast(frame)
         }
 
@@ -85,6 +100,21 @@ public final class HelperApp: @unchecked Sendable {
     private func requestKeyframe() {
         keyframes.request()
         capture?.requestFrame()
+    }
+
+    private func recordStats(_ frame: EncodedFrame) {
+        statsLock.lock()
+        encodedFrames += 1
+        encodeLatencySum += frame.encodeLatencyMicros
+        let count = encodedFrames
+        let average = encodeLatencySum / UInt64(max(1, count))
+        let shouldLog = count % 60 == 0
+        statsLock.unlock()
+
+        if shouldLog {
+            print(String(format: "stats encode_frames=%d avg_encode_ms=%.2f", count, Double(average) / 1000.0))
+            fflush(stdout)
+        }
     }
 }
 

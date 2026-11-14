@@ -59,7 +59,7 @@ final class SessionTests: XCTestCase {
 
     func testPingEchoesTimestamp() throws {
         let session = Session(config: config)
-        let actions = session.handle(try frame(from: encodePing(timestamp: 42)), nowMicros: 0)
+        let actions = session.handle(try frame(from: encodePing(timestamp: 42)), nowMicros: 7_000_000)
 
         XCTAssertEqual(actions.count, 1)
         guard case .send(let frame) = actions[0] else {
@@ -67,6 +67,10 @@ final class SessionTests: XCTestCase {
         }
         XCTAssertEqual(frame.type, MessageType.ping.rawValue)
         XCTAssertEqual(try decodePing(frame.payload), 42)
+        XCTAssertEqual(
+            Array(frame.payload.dropFirst(8)),
+            [0x00, 0x00, 0x00, 0x00, 0x00, 0x6A, 0xCF, 0xC0]
+        )
     }
 
     func testPongMatchingOwnPingIsNotEchoed() throws {

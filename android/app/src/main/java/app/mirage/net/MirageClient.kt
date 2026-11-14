@@ -1,14 +1,18 @@
 package app.mirage.net
 
+import android.os.SystemClock
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class MirageClient(
     private val host: String,
     private val port: Int,
     private val hello: Hello,
+    private val stats: StreamStats,
     private val listener: Listener
 ) {
     interface Listener {
@@ -28,6 +32,11 @@ class MirageClient(
 
     @Volatile
     private var output: OutputStream? = null
+
+    private var lastPingAtMs = 0L
+    private var pendingPingMicros: Long? = null
+    private var pendingPingSentNanos: Long? = null
+    private var clockOffsetMicros: Long? = null
 
     fun connect() {
         thread.start()
@@ -52,6 +61,54 @@ class MirageClient(
         }
     }
 
+    private fun maybeSendPing(stream: OutputStream) {
+        val now = System.currentTimeMillis()
+        if (now - lastPingAtMs < 1_000) return
+        lastPingAtMs = now
+
+        val micros = SystemClock.elapsedRealtimeNanos() / 1000
+        pendingPingMicros = micros
+        pendingPingSentNanos = SystemClock.elapsedRealtimeNanos()
+
+        val payload = ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN).putLong(micros).array()
+        try {
+            synchronized(stream) {
+                stream.write(Messages.encodeFrame(MessageType.PING.id, payload))
+                stream.flush()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun handlePing(payload: ByteArray, stream: OutputStream) {
+        if (payload.size < 8) return
+        val echoed = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).long
+        val pending = pendingPingMicros
+
+        if (pending != null && echoed == pending) {
+            val nowNanos = SystemClock.elapsedRealtimeNanos()
+            val sentNanos = pendingPingSentNanos
+            if (sentNanos != null) {
+                val rttMicros = (nowNanos - sentNanos) / 1000
+                if (payload.size >= 16) {
+                    val macMicros = ByteBuffer.wrap(payload, 8, 8).order(ByteOrder.BIG_ENDIAN).long
+                    clockOffsetMicros = nowNanos / 1000 - rttMicros / 2 - macMicros
+                }
+            }
+            pendingPingMicros = null
+            pendingPingSentNanos = null
+            return
+        }
+
+        try {
+            synchronized(stream) {
+                stream.write(Messages.encodePing(echoed))
+                stream.flush()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     private fun run() {
         var output: OutputStream? = null
         try {
@@ -71,6 +128,7 @@ class MirageClient(
             val buffer = ByteArray(64 * 1024)
 
             while (running) {
+                maybeSendPing(output)
                 connection.soTimeout = 1_000
                 val read = try {
                     input.read(buffer)
@@ -92,14 +150,20 @@ class MirageClient(
                             listener.onConfig(Messages.decodeSessionConfig(frame.payload))
 
                         MessageType.VIDEO.id -> {
-                            listener.onVideo(Messages.decodeVideo(frame.payload))
+                            val video = Messages.decodeVideo(frame.payload)
+                            stats.onVideo(frame.payload.size)
+                            clockOffsetMicros?.let { offset ->
+                                val nowMicros = SystemClock.elapsedRealtimeNanos() / 1000
+                                val e2eMicros = nowMicros - offset - video.header.captureTimestampMicros
+                                if (e2eMicros in 0..10_000_000) {
+                                    stats.setE2eMs(e2eMicros / 1000)
+                                }
+                            }
+                            listener.onVideo(video)
                         }
 
                         MessageType.PING.id -> {
-                            synchronized(output) {
-                                output.write(Messages.encodePing(Messages.decodePing(frame.payload)))
-                                output.flush()
-                            }
+                            handlePing(frame.payload, output)
                         }
 
                         MessageType.BYE.id -> {

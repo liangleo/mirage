@@ -69,8 +69,17 @@ if arguments.contains("--list-displays") {
     let port = argumentValue("--port").flatMap { UInt16($0) } ?? 7777
     let fps = argumentValue("--fps").flatMap { Int($0) } ?? 60
     let bitrate = argumentValue("--bitrate").flatMap { Int($0) } ?? 20_000_000
+    let maxWidth = argumentValue("--max-width").flatMap { Int($0) } ?? 3840
+    let maxHeight = argumentValue("--max-height").flatMap { Int($0) } ?? 2160
 
-    let app = HelperApp(displayID: displayID, port: port, fps: fps, bitrate: bitrate)
+    let app = HelperApp(
+        displayID: displayID,
+        port: port,
+        fps: fps,
+        bitrate: bitrate,
+        maxWidth: maxWidth,
+        maxHeight: maxHeight
+    )
     let box = ErrorBox()
     let startSemaphore = DispatchSemaphore(value: 0)
     Task.detached {

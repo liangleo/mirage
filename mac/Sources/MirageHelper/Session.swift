@@ -42,7 +42,11 @@ public final class Session: @unchecked Sendable {
                 return []
             }
             lastOutboundMicros = nowMicros
-            return [.send(Frame(type: MessageType.ping.rawValue, payload: frame.payload))]
+            var payload = frame.payload
+            for shift in stride(from: 56, through: 0, by: -8) {
+                payload.append(UInt8((nowMicros >> UInt64(shift)) & 0xff))
+            }
+            return [.send(Frame(type: MessageType.ping.rawValue, payload: payload))]
 
         case MessageType.ctrl.rawValue:
             return frame.payload.first == 1 ? [.requestKeyframe] : []
