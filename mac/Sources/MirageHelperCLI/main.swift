@@ -75,6 +75,7 @@ if arguments.contains("--list-displays") {
     let pointWidth = argumentValue("--width").flatMap { Int($0) } ?? 1280
     let pointHeight = argumentValue("--height").flatMap { Int($0) } ?? 800
     let autoSize = arguments.contains("--auto-size")
+    let position = DisplayPosition(rawValue: argumentValue("--position") ?? "right") ?? .right
     let dumpFramePath = argumentValue("--dump-frame")
     let recordPath = argumentValue("--record")
 
@@ -89,6 +90,7 @@ if arguments.contains("--list-displays") {
         pointWidth: pointWidth,
         pointHeight: pointHeight,
         autoSize: autoSize,
+        position: position,
         dumpFramePath: dumpFramePath,
         recordPath: recordPath
     )

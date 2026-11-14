@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -104,6 +105,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var usbManager: UsbManager
     private var pendingAccessory: UsbAccessory? = null
     private var usingUsb = false
+    private var closeHandled = false
 
     private val usbPermissionAction = "app.mirage.USB_PERMISSION"
     private val usbReceiver = object : BroadcastReceiver() {
@@ -138,6 +140,8 @@ class MainActivity : ComponentActivity() {
 
                 UsbManager.ACTION_USB_ACCESSORY_DETACHED -> {
                     if (usingUsb) {
+                        client?.close()
+                        client = null
                         handleConnectionClosed("USB 已断开")
                     }
                     pendingAccessory = null
@@ -228,6 +232,7 @@ class MainActivity : ComponentActivity() {
                     } else {
                         DisconnectedScreen(
                             status = status,
+                            connecting = connecting,
                             connectEnabled = !connecting,
                             onConnect = {
                                 if (savedHost.isNotBlank() && savedPort > 0) {
@@ -450,6 +455,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startClient(open: () -> StreamConnection, usb: Boolean) {
         usingUsb = usb
+        closeHandled = false
         val newClient = MirageClient(
             buildHello(),
             stats,
@@ -516,7 +522,11 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun handleConnectionClosed(reason: String) {
+        if (closeHandled) return
+        closeHandled = true
         client = null
+        connected = false
+        val displayReason = friendlyReason(reason)
         setKeepScreenOn(false)
         decoder?.release()
         decoder = null
@@ -529,9 +539,16 @@ class MainActivity : ComponentActivity() {
 
         if (manualDisconnect || !autoReconnectEnabled || isFinishing || isDestroyed) {
             if (!manualDisconnect) {
-                status = reason
+                status = displayReason
             }
             connecting = false
+            connected = false
+            return
+        }
+
+        if (usingUsb && findMirageAccessory() == null) {
+            status = "USB 已断开，请重新插入 USB"
+            connecting = true
             connected = false
             return
         }
@@ -540,12 +557,27 @@ class MainActivity : ComponentActivity() {
             autoReconnectEnabled = false
             connecting = false
             connected = false
-            status = "无法连接（$reason）"
+            status = "无法连接（$displayReason）"
             return
         }
 
-        status = "连接断开（$reason），自动重连中…"
+        status = if (usingUsb) {
+            "USB 连接已断开，自动重连中…"
+        } else {
+            "连接已断开，自动重连中…"
+        }
+        connecting = true
         scheduleReconnect()
+    }
+
+    private fun friendlyReason(reason: String): String {
+        val lower = reason.lowercase()
+        return when {
+            "econnrefused" in lower || "failed to connect" in lower ->
+                "无法连接 Mac（服务未启动或端口未转发）"
+            "timeout" in lower || "timed out" in lower -> "连接 Mac 超时"
+            else -> reason
+        }
     }
 
     private fun scheduleReconnect() {
@@ -690,6 +722,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun DisconnectedScreen(
     status: String,
+    connecting: Boolean,
     connectEnabled: Boolean,
     onConnect: () -> Unit,
     onSettings: () -> Unit
@@ -704,6 +737,13 @@ private fun DisconnectedScreen(
     ) {
         Text("Mirage", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(16.dp))
+        if (connecting) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(36.dp),
+                strokeWidth = 3.dp
+            )
+            Spacer(Modifier.height(16.dp))
+        }
         Text(status)
         Spacer(Modifier.height(24.dp))
         Button(onClick = onConnect, enabled = connectEnabled) {

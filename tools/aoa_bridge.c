@@ -30,6 +30,7 @@
 #define USB_BUFFER 16384
 
 static volatile sig_atomic_t stopping = 0;
+static volatile sig_atomic_t graceful_stop = 0;
 static libusb_context *usb_ctx = NULL;
 static libusb_device_handle *usb_handle = NULL;
 static unsigned char endpoint_in = 0;
@@ -43,6 +44,7 @@ static int hello_length = 0;
 static void on_signal(int sig) {
     (void)sig;
     stopping = 1;
+    graceful_stop = 1;
 }
 
 static int control_string(libusb_device_handle *handle, uint8_t index, const char *value) {
@@ -467,6 +469,13 @@ int main(int argc, char **argv) {
 
     close(tcp_fd);
     tcp_fd = -1;
+    if (graceful_stop) {
+        /* Ask the phone to leave accessory mode; it re-enumerates as
+         * charging/MTP instead of staying in ACCESSORY until a cable replug. */
+        int reset_rc = libusb_reset_device(usb_handle);
+        fprintf(stderr, "usb reset rc=%d\n", reset_rc);
+        fflush(stderr);
+    }
     libusb_release_interface(usb_handle, 0);
     libusb_close(usb_handle);
     usb_handle = NULL;

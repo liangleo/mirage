@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Darwin
 import MirageCore
+import ServiceManagement
 
 private func centerWindowOnPrimaryScreen(title: String) {
     DispatchQueue.main.async {
@@ -34,11 +35,14 @@ struct MirageMenuApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var terminationSources: [DispatchSourceSignal] = []
+
     func applicationWillTerminate(_ notification: Notification) {
-        HelperController.shared.stop()
+        HelperController.shared.shutdown()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installTerminationHandlers()
         guard HelperController.shared.acquireInstanceLock() else {
             NSApplication.shared.terminate(nil)
             return
@@ -54,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HelperController.shared.start()
         }
 
-        if arguments.contains("--usb") {
+        if arguments.contains("--usb") || HelperController.shared.usbEnabled {
             HelperController.shared.setUsbBridge(true)
         }
 
@@ -69,6 +73,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+
+    private func installTerminationHandlers() {
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler {
+                NSApplication.shared.terminate(nil)
+            }
+            source.resume()
+            terminationSources.append(source)
+        }
+    }
 }
 
 struct StatusMenu: View {
@@ -80,8 +96,8 @@ struct StatusMenu: View {
         Button(controller.isRunning ? "停止服务" : "启动服务") {
             controller.toggle()
         }
-        Button(controller.usbBridgeRunning ? "停止 USB 连接" : "USB 连接（AOA）") {
-            controller.setUsbBridge(!controller.usbBridgeRunning)
+        Button(controller.usbEnabled ? "停止 USB 连接" : "USB 连接（AOA）") {
+            controller.setUsbBridge(!controller.usbEnabled)
         }
         Divider()
         Button {
@@ -110,6 +126,14 @@ struct StatusMenu: View {
                 Button((controller.fps == fps ? "✓ " : "") + "\(fps) fps") {
                     controller.setFPS(fps)
                 }
+            }
+        }
+        Menu("副屏位置：\(controller.position.label)") {
+            Button((controller.position == .right ? "✓ " : "") + "主屏右侧") {
+                controller.setPosition(.right)
+            }
+            Button((controller.position == .left ? "✓ " : "") + "主屏左侧") {
+                controller.setPosition(.left)
             }
         }
         Divider()
@@ -166,8 +190,14 @@ struct MainView: View {
                 .toggleStyle(.switch)
 
                 Toggle("USB 免调试连接（AOA）", isOn: Binding(
-                    get: { controller.usbBridgeRunning },
+                    get: { controller.usbEnabled },
                     set: { controller.setUsbBridge($0) }
+                ))
+                .toggleStyle(.switch)
+
+                Toggle("登录时自动启动 Mirage", isOn: Binding(
+                    get: { controller.launchAtLogin },
+                    set: { controller.setLaunchAtLogin($0) }
                 ))
                 .toggleStyle(.switch)
             }
@@ -191,6 +221,17 @@ struct MainView: View {
                             Text(resolution.label).tag(resolution)
                         }
                     }
+
+                    Picker("副屏位置", selection: Binding(
+                        get: { controller.position },
+                        set: { controller.setPosition($0) }
+                    )) {
+                        Text(HelperController.DisplayPosition.right.label)
+                            .tag(HelperController.DisplayPosition.right)
+                        Text(HelperController.DisplayPosition.left.label)
+                            .tag(HelperController.DisplayPosition.left)
+                    }
+                    .disabled(controller.mode != .extend)
 
                     Picker("帧率", selection: Binding(
                         get: { controller.fps },
@@ -350,6 +391,13 @@ final class HelperController: ObservableObject {
         }
     }
 
+    enum DisplayPosition: String {
+        case right
+        case left
+
+        var label: String { self == .right ? "主屏右侧" : "主屏左侧" }
+    }
+
     static let resolutions: [Resolution] = [
         Resolution(width: 0, height: 0),
         Resolution(width: 960, height: 600),
@@ -364,8 +412,11 @@ final class HelperController: ObservableObject {
 
     @Published private(set) var mode: Mode
     @Published private(set) var resolution: Resolution
+    @Published private(set) var position: DisplayPosition
     @Published private(set) var fps: Int
     @Published private(set) var autoStartOnLaunch: Bool
+    @Published private(set) var usbEnabled: Bool
+    @Published private(set) var launchAtLogin: Bool
     @Published private(set) var isRunning = false
     @Published private(set) var usbBridgeRunning = false
     @Published private(set) var status = "未运行"
@@ -396,9 +447,14 @@ final class HelperController: ObservableObject {
             ? savedResolution
             : Self.resolutions[0]
 
+        position = UserDefaults.standard.string(forKey: "displayPosition")
+            .flatMap(DisplayPosition.init(rawValue:)) ?? .right
+
         let savedFPS = UserDefaults.standard.integer(forKey: "fps")
         fps = Self.frameRates.contains(savedFPS) ? savedFPS : 60
         autoStartOnLaunch = UserDefaults.standard.bool(forKey: "autoStartOnLaunch")
+        usbEnabled = UserDefaults.standard.bool(forKey: "usbEnabled")
+        launchAtLogin = SMAppService.mainApp.status == .enabled
 
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/Mirage", isDirectory: true)
@@ -503,17 +559,43 @@ final class HelperController: ObservableObject {
         }
     }
 
+    func setPosition(_ newPosition: DisplayPosition) {
+        guard newPosition != position else { return }
+        position = newPosition
+        UserDefaults.standard.set(newPosition.rawValue, forKey: "displayPosition")
+        if isRunning {
+            restart()
+        }
+    }
+
     func setAutoStartOnLaunch(_ enabled: Bool) {
         guard enabled != autoStartOnLaunch else { return }
         autoStartOnLaunch = enabled
         UserDefaults.standard.set(enabled, forKey: "autoStartOnLaunch")
     }
 
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            launchAtLogin = SMAppService.mainApp.status == .enabled
+        } catch {
+            launchAtLogin = SMAppService.mainApp.status == .enabled
+            status = "登录启动设置失败：\(error.localizedDescription)"
+        }
+    }
+
     func setUsbBridge(_ enabled: Bool) {
+        usbEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "usbEnabled")
         if enabled {
             startUsbBridge()
         } else {
             stopUsbBridge()
+            status = "USB 连接已关闭 · 如手机仍在 accessory 模式请拔插 USB"
         }
     }
 
@@ -562,7 +644,16 @@ final class HelperController: ObservableObject {
                 guard let self, self.bridgeProcess === ended else { return }
                 self.bridgeProcess = nil
                 self.usbBridgeRunning = false
-                self.status = "USB 桥接已停止（\(ended.terminationStatus)）· 查看日志"
+                if self.usbEnabled && self.isRunning {
+                    self.status = "USB 已启用，等待设备…"
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                        guard let self, self.usbEnabled, self.isRunning,
+                              self.bridgeProcess == nil else { return }
+                        self.startUsbBridge()
+                    }
+                } else {
+                    self.status = "USB 连接已关闭"
+                }
             }
         }
 
@@ -578,7 +669,13 @@ final class HelperController: ObservableObject {
 
     private func stopUsbBridge() {
         if let child = bridgeProcess {
-            kill(child.processIdentifier, SIGKILL)
+            let pid = child.processIdentifier
+            kill(pid, SIGTERM)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                if child.isRunning {
+                    kill(pid, SIGKILL)
+                }
+            }
         }
         bridgeProcess = nil
         usbBridgeRunning = false
@@ -620,6 +717,7 @@ final class HelperController: ObservableObject {
             } else {
                 arguments += ["--width", "\(resolution.width)", "--height", "\(resolution.height)"]
             }
+            arguments += ["--position", position.rawValue]
         } else {
             let maxWidth = resolution.isAuto ? 3840 : resolution.width * 2
             let maxHeight = resolution.isAuto ? 2160 : resolution.height * 2
@@ -652,9 +750,23 @@ final class HelperController: ObservableObject {
         }
 
         status = "运行中 · \(mode.title) · \(fps)fps"
+
+        if usbEnabled && bridgeProcess == nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.startUsbBridge()
+            }
+        }
     }
 
     func stop() {
+        usbEnabled = false
+        UserDefaults.standard.set(false, forKey: "usbEnabled")
+        stopUsbBridge()
+        stopHelperOnly()
+        status = "已停止 · USB 连接已关闭"
+    }
+
+    func shutdown() {
         stopUsbBridge()
         stopHelperOnly()
         status = "已停止"
@@ -673,14 +785,16 @@ final class HelperController: ObservableObject {
     }
 
     private func restart() {
-        if usbBridgeRunning {
+        if usbEnabled {
             stopHelperOnly()
             status = "重启服务…"
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                 self?.start()
             }
         } else {
-            stop()
+            stopHelperOnly()
+            stopUsbBridge()
+            status = "重启服务…"
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                 self?.start()
             }

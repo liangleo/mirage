@@ -13,6 +13,11 @@ public enum DisplayMode: String {
     case extend
 }
 
+public enum DisplayPosition: String {
+    case right
+    case left
+}
+
 public final class HelperApp: @unchecked Sendable {
     private let displayID: CGDirectDisplayID
     private let port: UInt16
@@ -24,6 +29,7 @@ public final class HelperApp: @unchecked Sendable {
     private let pointWidth: Int
     private let pointHeight: Int
     private let autoSize: Bool
+    private let position: DisplayPosition
     private let dumpFramePath: String?
     private var dumpedFrame = false
     private let recordPath: String?
@@ -49,6 +55,7 @@ public final class HelperApp: @unchecked Sendable {
         pointWidth: Int = 1280,
         pointHeight: Int = 800,
         autoSize: Bool = false,
+        position: DisplayPosition = .right,
         dumpFramePath: String? = nil,
         recordPath: String? = nil
     ) {
@@ -62,6 +69,7 @@ public final class HelperApp: @unchecked Sendable {
         self.pointWidth = pointWidth
         self.pointHeight = pointHeight
         self.autoSize = autoSize
+        self.position = position
         self.dumpFramePath = dumpFramePath
         self.recordPath = recordPath
     }
@@ -156,6 +164,7 @@ public final class HelperApp: @unchecked Sendable {
             )
             if waitForDisplay(created.displayID, timeout: 5.0) {
                 virtualDisplay = created
+                positionVirtualDisplay(created.displayID)
                 print("extend display=\(created.displayID) points=\(pointWidth)x\(pointHeight)")
                 fflush(stdout)
                 return created.displayID
@@ -169,6 +178,29 @@ public final class HelperApp: @unchecked Sendable {
             fflush(stdout)
             return displayID
         }
+    }
+
+    private func positionVirtualDisplay(_ id: CGDirectDisplayID) {
+        let main = CGDisplayBounds(CGMainDisplayID())
+        let own = CGDisplayBounds(id)
+        let x: CGFloat
+        switch position {
+        case .right:
+            x = main.maxX
+        case .left:
+            x = main.minX - own.width
+        }
+        var config: CGDisplayConfigRef?
+        let begin = CGBeginDisplayConfiguration(&config)
+        guard begin == .success, let config else {
+            print("extend_position=failed begin=\(begin.rawValue)")
+            fflush(stdout)
+            return
+        }
+        CGConfigureDisplayOrigin(config, id, Int32(x), Int32(main.minY))
+        let complete = CGCompleteDisplayConfiguration(config, .permanently)
+        print("extend_position=\(position.rawValue) x=\(Int(x)) result=\(complete.rawValue) bounds=\(CGDisplayBounds(id))")
+        fflush(stdout)
     }
 
     private func waitForDisplay(_ id: CGDirectDisplayID, timeout: TimeInterval) -> Bool {

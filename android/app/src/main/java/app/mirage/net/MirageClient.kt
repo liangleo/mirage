@@ -30,6 +30,14 @@ class MirageClient(
     @Volatile
     private var output: OutputStream? = null
 
+    @Volatile
+    private var connectedOnce = false
+
+    @Volatile
+    private var closedReported = false
+
+    private var watchdog: Thread? = null
+
     private var lastPingAtMs = 0L
     private var pendingPingMicros: Long? = null
     private var pendingPingSentNanos: Long? = null
@@ -37,6 +45,31 @@ class MirageClient(
 
     fun connect() {
         thread.start()
+        watchdog = Thread({ watchLiveness() }, "mirage-watchdog").also { it.start() }
+    }
+
+    private fun watchLiveness() {
+        while (running) {
+            try {
+                Thread.sleep(500)
+            } catch (_: InterruptedException) {
+                return
+            }
+            if (!running) return
+            if (connectedOnce && liveness.timedOut(System.currentTimeMillis())) {
+                reportClosed("连接无响应")
+                close()
+                return
+            }
+        }
+    }
+
+    private fun reportClosed(reason: String) {
+        synchronized(this) {
+            if (closedReported) return
+            closedReported = true
+        }
+        listener.onClosed(reason)
     }
 
     fun requestKeyframe() {
@@ -118,6 +151,7 @@ class MirageClient(
             this.output = output
             output.write(Messages.encodeHello(hello))
             output.flush()
+            connectedOnce = true
             liveness.noteActivity(System.currentTimeMillis())
 
             val input = connection.input
@@ -131,7 +165,7 @@ class MirageClient(
                     input.read(buffer)
                 } catch (_: SocketTimeoutException) {
                     if (liveness.timedOut(System.currentTimeMillis())) {
-                        listener.onClosed("连接无响应")
+                        reportClosed("连接无响应")
                         return
                     }
                     continue
@@ -164,18 +198,19 @@ class MirageClient(
                         }
 
                         MessageType.BYE.id -> {
-                            listener.onClosed("服务端断开")
+                            reportClosed("服务端断开")
                             return
                         }
                     }
                 }
             }
-            listener.onClosed("连接已断开")
+            reportClosed("连接已断开")
         } catch (error: Exception) {
             if (running) {
-                listener.onClosed(error.message ?: "连接失败")
+                reportClosed(error.message ?: "连接失败")
             }
         } finally {
+            running = false
             try {
                 active?.close()
             } catch (_: Exception) {

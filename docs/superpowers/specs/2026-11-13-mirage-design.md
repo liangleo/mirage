@@ -338,6 +338,7 @@ count × 32 字节：
 - 前台服务保活、屏幕常亮、断线指数退避重连。
 - Wi-Fi 下申请低延迟 Wi-Fi 锁（`WifiManager.WifiLock` + `WIFI_MODE_FULL_LOW_LATENCY`）。
 - 横竖屏切换时重发 HELLO 并等待新的 SESSION_CONFIG。
+- 断线后自动重连期间，连接页显示圆形进度指示并禁用连接按钮，避免误以为卡死。
 - 显示调试浮层：fps、码率、解码耗时、丢帧数、端到端延迟、RTT（decode/e2e/rtt，单位 ms，可关闭）。
 - 卓易通（鸿蒙 NEXT）：不承诺可用。已知风险——USB accessory 大概率不通、ADB 不可用（鸿蒙用 hdc）、NSD 组播可能被容器网络阻断、Wi-Fi 低延迟锁可能无效、解码可能退回软解。连接页必须保留手动输入 IP 与二维码兜底，并允许关闭低延迟键。
 
@@ -363,7 +364,7 @@ count × 32 字节：
 - 打包：libusb dylib 的 install_name 指向 Homebrew 绝对路径，需改 `@rpath` 并重新签名（公证要求所有 Mach-O 已签）；或静态链接并履行 LGPL 可重链接义务。
 - 已知失败模式：个别 ROM 的 `GET_PROTOCOL` 失败；USB 3 口重枚举异常而 USB 2 正常；App 未安装/被强停时设备卡在 accessory 模式需拔插。
 
-实现现状（2026-11-14）：AOA 通过独立的 `mirage-aoa` 桥接进程实现：libusb 静态链接，负责 GET_PROTOCOL/SEND_STRING/START、bulk 端点读写，并把字节流转发到 helper 的 127.0.0.1:7777。helper 因自动分辨率 `execv` 重启时，桥接进程保持 accessory 打开、重连 TCP 并重放 HELLO。Android 端通过 `USB_ACCESSORY_ATTACHED` 自动拉起，复用同一协议帧；Mac 主界面/菜单提供「USB 免调试连接（AOA）」开关。首次连接需系统授权；停止桥接后通常需要拔插 USB 才能退出 accessory 模式。调试机型 vivo V2309A 实测 USB 路径 2800×1260@60 约 51 fps、decode 36 ms、e2e 45 ms、RTT 0 ms。自动热插拔检测与 LaunchAgent 常驻尚未实现。
+实现现状（2026-11-14）：AOA 通过独立的 `mirage-aoa` 桥接进程实现：libusb 静态链接，负责 GET_PROTOCOL/SEND_STRING/START、bulk 端点读写，并把字节流转发到 helper 的 127.0.0.1:7777。helper 因自动分辨率 `execv` 重启时，桥接进程保持 accessory 打开、重连 TCP 并重放 HELLO。Android 端通过 `USB_ACCESSORY_ATTACHED` 自动拉起，复用同一协议帧；Mac 主界面/菜单提供「USB 免调试连接（AOA）」开关，开关持久化并在 App/服务启动时自动尝试连接。桥接退出（拔线、无设备）后 App 自动重启桥接等待设备，实现热插拔自动恢复。正常停止服务时，桥接收到 SIGTERM 后调用 `libusb_reset_device`，手机恢复为普通 USB 功能（实测 `charging,adb`）；不支持的 ROM 才需要拔插。调试机型 vivo V2309A 实测 USB 路径 2800×1260@60 约 51 fps、decode 36 ms、e2e 45 ms、RTT 0 ms。登录启动通过 `SMAppService.mainApp` 提供开关。
 
 ### 8.2 adb reverse（开发期与兜底）
 
@@ -520,7 +521,7 @@ v1.0 合计约 **24–40 人天（5–8 周）**。顺利情况下约 4 周可�
 - M0：协议 v1、共享测试向量、mock server/client、Mac 捕获/编码 CLI。
 - M1：Android 解码显示（SurfaceView）、逐帧统计、丢帧后关键帧恢复、自动重连；开发期使用 `adb reverse`。
 - M2：`CGVirtualDisplay` 扩展屏、设备旋转/分辨率自适应（helper 通过 `execv` 重建虚拟屏）、菜单栏 App 与独立主窗口、内嵌实时日志。
-- M3：AOA 免调试 USB 桥接（`tools/aoa_bridge.c` + 静态 libusb）、Android USB Accessory 自动拉起与授权、Mac「USB 免调试连接」开关；helper 重启后桥接自动重连。
+- M3：AOA 免调试 USB 桥接（`tools/aoa_bridge.c` + 静态 libusb）、Android USB Accessory 自动拉起与授权、Mac「USB 免调试连接」持久化开关、桥接退出后自动重启等待设备、登录启动（`SMAppService`）；helper 重启后桥接自动重连。
 - Android 控制面板位于屏幕右侧，含设置、调试开关、断开；调试浮层显示 decode/e2e/rtt 延迟（ms）。
 
 **真机验收（vivo V2309A，Android 16，MediaTek）：**
@@ -531,7 +532,7 @@ v1.0 合计约 **24–40 人天（5–8 周）**。顺利情况下约 4 周可�
 
 **与完整 v1.0 验收标准的差距：**
 
-- AOA 已可用，但还没有插入 USB 后的自动热插拔启动/LaunchAgent 常驻；`adb reverse` 仍保留为兜底。
+- AOA 已可用并支持持久化/自动重试，但桥接仍是轮询式等待设备（1.5 s），不是 IOKit 即时热插拔；`adb reverse` 仍保留为兜底。
 - TCP/AOA 均为明文，无 TLS；Wi-Fi/5GHz 路径未实现。
 - 未做 2 小时稳定性与内存增长测试；平板性能基准尚未单独验收。
 - 上述差距作为后续里程碑，不阻塞当前显示链路与 AOA 基础链路验收。
