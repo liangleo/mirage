@@ -59,6 +59,13 @@ class MainActivity : ComponentActivity() {
     private var client: MirageClient? = null
     private val stats = StreamStats()
 
+    private var lastHost: String? = null
+    private var lastPort: Int = 0
+    private var autoReconnectEnabled = false
+    private var manualDisconnect = false
+    private var reconnectAttempts = 0
+    private var reconnectRunnable: Runnable? = null
+
     private var connected by mutableStateOf(false)
     private var status by mutableStateOf("未连接")
 
@@ -96,11 +103,24 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun connect(host: String, port: Int) {
-        status = "连接中…"
+    private fun connect(host: String, port: Int, isReconnect: Boolean = false) {
+        lastHost = host
+        lastPort = port
+        if (!isReconnect) {
+            autoReconnectEnabled = false
+            manualDisconnect = false
+            reconnectAttempts = 0
+        }
+        status = if (isReconnect) "重连中…（第 $reconnectAttempts 次）" else "连接中…"
+
+        client?.close()
+        client = null
+
         val newClient = MirageClient(host, port, buildHello(), stats, object : MirageClient.Listener {
             override fun onConfig(newConfig: SessionConfig) {
                 mainHandler.post {
+                    autoReconnectEnabled = true
+                    reconnectAttempts = 0
                     config = newConfig
                     status = "已连接 ${newConfig.width}x${newConfig.height}@${newConfig.fps}"
                     connected = true
@@ -118,20 +138,53 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun onClosed(reason: String) {
-                mainHandler.post {
-                    decoder?.release()
-                    decoder = null
-                    config = null
-                    connected = false
-                    status = reason
-                }
+                mainHandler.post { handleConnectionClosed(reason) }
             }
         })
         client = newClient
         newClient.connect()
     }
 
+    private fun handleConnectionClosed(reason: String) {
+        client = null
+        decoder?.release()
+        decoder = null
+        config = null
+        pendingKeyframe = null
+
+        if (manualDisconnect || !autoReconnectEnabled || isFinishing || isDestroyed) {
+            if (!manualDisconnect) {
+                status = reason
+            }
+            connected = false
+            return
+        }
+
+        status = "连接断开（$reason），自动重连中…"
+        scheduleReconnect()
+    }
+
+    private fun scheduleReconnect() {
+        val host = lastHost ?: return
+        if (host.isBlank() || lastPort <= 0) return
+
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectAttempts++
+        val delayMs = (500L * (1 shl minOf(reconnectAttempts - 1, 3))).coerceAtMost(5_000L)
+
+        val runnable = Runnable {
+            if (isFinishing || isDestroyed || !autoReconnectEnabled || manualDisconnect) return@Runnable
+            connect(host, lastPort, isReconnect = true)
+        }
+        reconnectRunnable = runnable
+        mainHandler.postDelayed(runnable, delayMs)
+    }
+
     private fun disconnect() {
+        manualDisconnect = true
+        autoReconnectEnabled = false
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
         client?.close()
         client = null
         decoder?.release()
