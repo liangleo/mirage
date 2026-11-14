@@ -74,8 +74,7 @@ if arguments.contains("--list-displays") {
     let mode = DisplayMode(rawValue: argumentValue("--mode") ?? "mirror") ?? .mirror
     let pointWidth = argumentValue("--width").flatMap { Int($0) } ?? 1280
     let pointHeight = argumentValue("--height").flatMap { Int($0) } ?? 800
-    let autoSize = arguments.contains("--auto-size") && !arguments.contains("--sized")
-    let alreadySized = arguments.contains("--sized")
+    let autoSize = arguments.contains("--auto-size")
     let dumpFramePath = argumentValue("--dump-frame")
     let recordPath = argumentValue("--record")
 
@@ -90,7 +89,6 @@ if arguments.contains("--list-displays") {
         pointWidth: pointWidth,
         pointHeight: pointHeight,
         autoSize: autoSize,
-        alreadySized: alreadySized,
         dumpFramePath: dumpFramePath,
         recordPath: recordPath
     )

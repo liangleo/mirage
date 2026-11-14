@@ -24,7 +24,6 @@ public final class HelperApp: @unchecked Sendable {
     private let pointWidth: Int
     private let pointHeight: Int
     private let autoSize: Bool
-    private let alreadySized: Bool
     private let dumpFramePath: String?
     private var dumpedFrame = false
     private let recordPath: String?
@@ -50,7 +49,6 @@ public final class HelperApp: @unchecked Sendable {
         pointWidth: Int = 1280,
         pointHeight: Int = 800,
         autoSize: Bool = false,
-        alreadySized: Bool = false,
         dumpFramePath: String? = nil,
         recordPath: String? = nil
     ) {
@@ -64,7 +62,6 @@ public final class HelperApp: @unchecked Sendable {
         self.pointWidth = pointWidth
         self.pointHeight = pointHeight
         self.autoSize = autoSize
-        self.alreadySized = alreadySized
         self.dumpFramePath = dumpFramePath
         self.recordPath = recordPath
     }
@@ -193,7 +190,7 @@ public final class HelperApp: @unchecked Sendable {
     }
 
     private func handleAutoSize(_ hello: Hello) {
-        guard mode == .extend, autoSize, !alreadySized else { return }
+        guard mode == .extend, autoSize else { return }
 
         let pixelWidth = Int(hello.screenWidth)
         let pixelHeight = Int(hello.screenHeight)
@@ -220,14 +217,12 @@ public final class HelperApp: @unchecked Sendable {
             switch arguments[index] {
             case "--width", "--height":
                 index += 2
-            case "--auto-size", "--sized":
-                index += 1
             default:
                 cleaned.append(arguments[index])
                 index += 1
             }
         }
-        cleaned += ["--width", "\(width)", "--height", "\(height)", "--sized"]
+        cleaned += ["--width", "\(width)", "--height", "\(height)"]
 
         var cArguments = cleaned.map { strdup($0) }
         cArguments.append(nil)

@@ -136,6 +136,13 @@ final class HelperController: ObservableObject {
     private var instanceLockFD: Int32 = -1
 
     private init() {
+        let autoDefaultKey = "resolutionDefaultAutoV1"
+        if !UserDefaults.standard.bool(forKey: autoDefaultKey) {
+            UserDefaults.standard.set(0, forKey: "resolutionWidth")
+            UserDefaults.standard.set(0, forKey: "resolutionHeight")
+            UserDefaults.standard.set(true, forKey: autoDefaultKey)
+        }
+
         let savedMode = UserDefaults.standard.string(forKey: "mode").flatMap(Mode.init(rawValue:)) ?? .extend
         mode = savedMode
 
