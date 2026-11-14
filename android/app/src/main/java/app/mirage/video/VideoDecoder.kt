@@ -29,6 +29,9 @@ class VideoDecoder(
     @Volatile
     private var running = true
 
+    @Volatile
+    private var waitingForKeyframe = false
+
     private var codec: MediaCodec? = null
     private var initFailures = 0
     private var outputs = 0
@@ -41,6 +44,8 @@ class VideoDecoder(
     fun submit(frame: VideoFrame) {
         if (running && queue.offer(frame)) {
             stats.onDropped()
+            waitingForKeyframe = true
+            onNeedKeyframe()
         }
     }
 
@@ -83,9 +88,22 @@ class VideoDecoder(
             return
         }
         initFailures = 0
+        waitingForKeyframe = false
 
         var pending: VideoFrame? = firstKeyframe
         while (running) {
+            if (waitingForKeyframe) {
+                val candidate = queue.poll(50) ?: continue
+                if (candidate.header.flags and 1 == 0) continue
+                waitingForKeyframe = false
+                try {
+                    codec?.flush()
+                } catch (_: Exception) {
+                }
+                submittedAtNanos.clear()
+                pending = candidate
+            }
+
             val frame = pending ?: queue.poll(50)
             if (frame == null) {
                 drainOutput()
@@ -132,6 +150,7 @@ class VideoDecoder(
         codec = null
         queue.clear()
         submittedAtNanos.clear()
+        waitingForKeyframe = false
         onNeedKeyframe()
         if (running) {
             handler.post { loop() }
@@ -187,6 +206,15 @@ class VideoDecoder(
         try {
             decoder.configure(format, surface, null, 0)
             decoder.start()
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    surface.setFrameRate(
+                        config.fps.toFloat(),
+                        Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
+                    )
+                } catch (_: Exception) {
+                }
+            }
         } catch (error: Exception) {
             try {
                 decoder.release()

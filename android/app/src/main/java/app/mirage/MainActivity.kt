@@ -203,6 +203,7 @@ class MainActivity : ComponentActivity() {
         if (decoder != null) return
 
         surfaceView?.apply {
+            holder.setFixedSize(currentConfig.width, currentConfig.height)
             videoWidth = currentConfig.width
             videoHeight = currentConfig.height
         }
