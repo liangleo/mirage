@@ -1,0 +1,209 @@
+import Foundation
+import Darwin
+import MirageCore
+
+public final class UdpVideoSender: @unchecked Sendable {
+    public typealias SendHook = (Data) -> Void
+
+    public var onPeerReady: (() -> Void)?
+    public var onLog: ((String) -> Void)?
+
+    public private(set) var sentDatagrams = 0
+    public private(set) var retransmits = 0
+    public private(set) var droppedFrames = 0
+    public private(set) var sendErrors = 0
+
+    private let port: UInt16
+    private let key: Data
+    private let noncePrefix: Data
+    private let sendHook: SendHook?
+    private let queue = DispatchQueue(label: "app.mirage.udp.sender")
+    private var fd: Int32 = -1
+    private var source: DispatchSourceRead?
+    private var peer: sockaddr_in?
+    private var nextSeq: UInt32 = 1
+    private var cache: [UInt32: [Data]] = [:]
+    private var cacheOrder: [UInt32] = []
+    private var retransmitted: Set<UInt64> = []
+
+    public init(
+        port: UInt16,
+        key: Data,
+        noncePrefix: Data,
+        send: SendHook? = nil
+    ) {
+        self.port = port
+        self.key = key
+        self.noncePrefix = noncePrefix
+        self.sendHook = send
+    }
+
+    public func start() throws {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { throw POSIXError(.EMFILE) }
+        var reuse: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        address.sin_addr = in_addr(s_addr: INADDR_ANY)
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0 else {
+            close(fd)
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        self.fd = fd
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        source.setEventHandler { [weak self] in
+            self?.receiveLoop()
+        }
+        source.resume()
+        self.source = source
+    }
+
+    public func stop() {
+        source?.cancel()
+        source = nil
+        if fd >= 0 {
+            close(fd)
+            fd = -1
+        }
+    }
+
+    public func send(frame: EncodedFrame) {
+        let payload = frame.data
+        guard !payload.isEmpty else { return }
+        let fragCount = (payload.count + UdpVideoHeader.maxPayload - 1) / UdpVideoHeader.maxPayload
+        guard fragCount > 0, fragCount <= Int(UInt16.max) else { return }
+
+        var datagrams: [Data] = []
+        datagrams.reserveCapacity(fragCount)
+        for index in 0..<fragCount {
+            let start = index * UdpVideoHeader.maxPayload
+            let end = min(start + UdpVideoHeader.maxPayload, payload.count)
+            let chunk = payload.subdata(in: start..<end)
+            var flags: UInt8 = 0
+            if index == 0 { flags |= UdpFlags.sof }
+            if index == fragCount - 1 { flags |= UdpFlags.eof }
+            if frame.header.flags & 1 != 0 { flags |= UdpFlags.key }
+
+            let sequence = nextSeq
+            nextSeq &+= 1
+            let header = UdpVideoHeader(
+                seq: sequence,
+                frameID: frame.header.frameID,
+                fragIndex: UInt16(index),
+                fragCount: UInt16(fragCount),
+                flags: flags,
+                payloadLength: UInt16(chunk.count + 16)
+            )
+            do {
+                let sealed = try udpSeal(chunk, header: header, key: key, noncePrefix: noncePrefix)
+                datagrams.append(encodeUdpHeader(header) + sealed)
+            } catch {
+                droppedFrames += 1
+                onLog?("udp seal failed: \(error)")
+                return
+            }
+        }
+
+        cache[frame.header.frameID] = datagrams
+        cacheOrder.append(frame.header.frameID)
+        while cacheOrder.count > 3 {
+            cache.removeValue(forKey: cacheOrder.removeFirst())
+        }
+        for datagram in datagrams {
+            emit(datagram)
+        }
+    }
+
+    public func handleNack(_ datagram: UdpDatagram) {
+        guard datagram.header.isNack else { return }
+        let bitmap = datagram.payload
+        guard let fragments = cache[datagram.header.frameID] else { return }
+
+        for byteIndex in 0..<bitmap.count {
+            let byte = bitmap[bitmap.startIndex + byteIndex]
+            guard byte != 0 else { continue }
+            for bit in 0..<8 where byte & (1 << UInt8(bit)) != 0 {
+                let fragIndex = Int(datagram.header.fragIndex) + byteIndex * 8 + bit
+                guard fragIndex < fragments.count else { continue }
+                let key = UInt64(datagram.header.frameID) << 32 | UInt64(fragIndex)
+                guard !retransmitted.contains(key) else { continue }
+                retransmitted.insert(key)
+                retransmits += 1
+                emit(fragments[fragIndex])
+            }
+        }
+    }
+
+    private func emit(_ datagram: Data) {
+        if let sendHook {
+            sendHook(datagram)
+            sentDatagrams += 1
+            return
+        }
+        guard let peer else {
+            droppedFrames += 1
+            return
+        }
+        var address = peer
+        let sent = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                sendto(fd, (datagram as NSData).bytes, datagram.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if sent < 0 {
+            sendErrors += 1
+        } else {
+            sentDatagrams += 1
+        }
+    }
+
+    private func receiveLoop() {
+        var buffer = [UInt8](repeating: 0, count: 2048)
+        while true {
+            var address = sockaddr_in()
+            var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let count = buffer.withUnsafeMutableBytes { raw in
+                withUnsafeMutablePointer(to: &address) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        recvfrom(fd, raw.baseAddress, raw.count, 0, $0, &length)
+                    }
+                }
+            }
+            guard count > 0 else { return }
+            let data = Data(buffer[0..<count])
+            guard let datagram = try? decodeUdpDatagram(data) else { continue }
+
+            if datagram.header.isHello {
+                peer = address
+                onLog?("udp peer ready")
+                onPeerReady?()
+                sendHelloAck()
+            } else if datagram.header.isNack {
+                handleNack(datagram)
+            }
+        }
+    }
+
+    private func sendHelloAck() {
+        let header = UdpVideoHeader(
+            seq: nextSeq,
+            frameID: 0,
+            fragIndex: 0,
+            fragCount: 1,
+            flags: UdpFlags.hello,
+            payloadLength: 0
+        )
+        nextSeq &+= 1
+        emit(encodeUdpHeader(header))
+    }
+}

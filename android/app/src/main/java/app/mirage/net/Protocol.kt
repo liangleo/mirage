@@ -12,7 +12,20 @@ enum class MessageType(val id: Int) {
     FEEDBACK(5),
     CTRL(6),
     PING(7),
-    BYE(8)
+    BYE(8),
+    KEY(9),
+    TEXT(10),
+    SCROLL(11),
+    UDP_CONFIG(12)
+}
+
+object Ctrl {
+    const val REQUEST_KEYFRAME = 1
+    const val RELEASE_ALL = 2
+    const val INPUT_ENABLED = 3
+    const val INPUT_DISABLED = 4
+    const val UDP_FAILED = 5
+    const val UDP_READY = 6
 }
 
 data class Frame(val type: Int, val payload: ByteArray)
@@ -73,7 +86,8 @@ data class SessionConfig(
     val fps: Int,
     val codec: Int,
     val bitrate: Long,
-    val rotation: Int
+    val rotation: Int,
+    val inputCaps: Int = 0
 )
 
 data class VideoHeader(
@@ -153,7 +167,8 @@ object Messages {
             fps = buffer.get(4).toInt() and 0xff,
             codec = buffer.get(5).toInt() and 0xff,
             bitrate = buffer.getInt(6).toLong() and 0xffffffffL,
-            rotation = buffer.get(10).toInt() and 0xff
+            rotation = buffer.get(10).toInt() and 0xff,
+            inputCaps = if (payload.size >= 12) payload[11].toInt() and 0xff else 0
         )
     }
 

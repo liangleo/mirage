@@ -51,14 +51,24 @@ public struct SessionConfig: Equatable {
     public let codec: UInt8
     public let bitrate: UInt32
     public let rotation: UInt8
+    public var inputCaps: UInt8
 
-    public init(width: UInt16, height: UInt16, fps: UInt8, codec: UInt8, bitrate: UInt32, rotation: UInt8) {
+    public init(
+        width: UInt16,
+        height: UInt16,
+        fps: UInt8,
+        codec: UInt8,
+        bitrate: UInt32,
+        rotation: UInt8,
+        inputCaps: UInt8 = 0
+    ) {
         self.width = width
         self.height = height
         self.fps = fps
         self.codec = codec
         self.bitrate = bitrate
         self.rotation = rotation
+        self.inputCaps = inputCaps
     }
 }
 
@@ -131,6 +141,7 @@ public func encodeSessionConfig(_ config: SessionConfig) -> Data {
     payload.append(config.codec)
     payload.appendUInt32BE(config.bitrate)
     payload.append(config.rotation)
+    payload.append(config.inputCaps)
     return encodeFrame(Frame(type: MessageType.sessionConfig.rawValue, payload: payload))
 }
 
@@ -142,7 +153,8 @@ public func decodeSessionConfig(_ payload: Data) throws -> SessionConfig {
         fps: payload[4],
         codec: payload[5],
         bitrate: payload.readUInt32BE(6),
-        rotation: payload[10]
+        rotation: payload[10],
+        inputCaps: payload.count >= 12 ? payload[11] : 0
     )
 }
 

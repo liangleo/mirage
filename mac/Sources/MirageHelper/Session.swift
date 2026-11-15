@@ -5,12 +5,14 @@ public enum SessionAction: Equatable {
     case send(Frame)
     case close(reason: String)
     case requestKeyframe
+    case inject(InputEvent)
 }
 
 public final class Session: @unchecked Sendable {
-    private let config: SessionConfig
+    private var config: SessionConfig
     private var lastOutboundMicros: UInt64 = 0
     private var lastPingTimestamp: UInt64?
+    public var inputCaps: UInt8 = 0
 
     public init(config: SessionConfig) {
         self.config = config
@@ -25,6 +27,7 @@ public final class Session: @unchecked Sendable {
                     return [.close(reason: "unsupported protocol version \(hello.protoVersion)")]
                 }
                 lastOutboundMicros = nowMicros
+                config.inputCaps = inputCaps
                 guard let configFrame = singleFrame(encodeSessionConfig(config)) else {
                     return [.close(reason: "failed to encode session config")]
                 }
@@ -49,7 +52,30 @@ public final class Session: @unchecked Sendable {
             return [.send(Frame(type: MessageType.ping.rawValue, payload: payload))]
 
         case MessageType.ctrl.rawValue:
-            return frame.payload.first == 1 ? [.requestKeyframe] : []
+            switch frame.payload.first {
+            case CtrlCode.requestKeyframe:
+                return [.requestKeyframe]
+            case CtrlCode.releaseAll:
+                return [.inject(.releaseAll)]
+            default:
+                return []
+            }
+
+        case MessageType.input.rawValue:
+            guard let samples = try? decodeInput(frame.payload) else { return [] }
+            return [.inject(.pointer(samples))]
+
+        case MessageType.key.rawValue:
+            guard let key = try? decodeKey(frame.payload) else { return [] }
+            return [.inject(.key(key))]
+
+        case MessageType.text.rawValue:
+            guard let text = try? decodeText(frame.payload) else { return [] }
+            return [.inject(.text(text))]
+
+        case MessageType.scroll.rawValue:
+            guard let scroll = try? decodeScroll(frame.payload) else { return [] }
+            return [.inject(.scroll(scroll))]
 
         case MessageType.bye.rawValue:
             return [.close(reason: "client bye")]

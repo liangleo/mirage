@@ -60,6 +60,9 @@ class StreamStats {
         codecLabel = value
     }
 
+    val currentDecodeMs: Long get() = decodeMs
+    val currentRttMs: Long get() = rttMs
+
     @Synchronized
     fun snapshot(nowMs: Long = System.currentTimeMillis()): StatsSnapshot {
         if (lastTickMs == 0L) {

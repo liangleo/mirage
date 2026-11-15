@@ -26,5 +26,101 @@
       "captureTimestampMicros": 1000,
       "reserved": 0
     }
+  },
+  "udp": {
+    "datagram": {
+      "hex": "00000001000000640001000300000004deadbeef",
+      "fields": {
+        "seq": 1,
+        "frameID": 100,
+        "fragIndex": 1,
+        "fragCount": 3,
+        "flags": 0,
+        "reserved": 0,
+        "payloadLength": 4,
+        "payloadHex": "deadbeef"
+      }
+    },
+    "nack": {
+      "hex": "0000000900000064000000010800000105",
+      "fields": {
+        "seq": 9,
+        "frameID": 100,
+        "bitmapStart": 0,
+        "bitmapHex": "05"
+      }
+    },
+    "feedback": {
+      "hex": "0257000800000001000c00030112a8800000000f00000000000003e8",
+      "fields": {
+        "fpsX10": 599,
+        "decodeMS": 8,
+        "droppedFrames": 0,
+        "queueDepth": 1,
+        "rttMS": 12,
+        "lossPermille": 3,
+        "recvBitrateBps": 18000000,
+        "arrivalDelayMS": 15,
+        "timestampMicros": 1000
+      }
+    }
+  },
+  "input": {
+    "hex": "000000430400020100000142c90000434840003f4ccccd3dcccccdbe4ccccd00000019debd01c70200000142cb0000434940003f333333000000000000000000000019debd061e",
+    "fields": {
+      "count": 2,
+      "samples": [
+        {
+          "kind": 1,
+          "pointerID": 0,
+          "buttons": 1,
+          "x": 100.5,
+          "y": 200.25,
+          "pressure": 0.8,
+          "tiltX": 0.1,
+          "tiltY": -0.2,
+          "tsMicros": 111111111111
+        },
+        {
+          "kind": 2,
+          "pointerID": 0,
+          "buttons": 1,
+          "x": 101.5,
+          "y": 201.25,
+          "pressure": 0.7,
+          "tiltX": 0.0,
+          "tiltY": 0.0,
+          "tsMicros": 111111112222
+        }
+      ]
+    }
+  },
+  "key": {
+    "hex": "000000130901090000001d0000006100007048860ddf79",
+    "fields": {
+      "action": 1,
+      "modifiers": 9,
+      "flags": 0,
+      "keycode": 29,
+      "unicode": 97,
+      "tsMicros": 123456789012345
+    }
+  },
+  "text": {
+    "hex": "000000140a0009e4bda0e5a5bd61626300000034005f7a85",
+    "fields": {
+      "text": "你好abc",
+      "tsMicros": 223344556677
+    }
+  },
+  "scroll": {
+    "hex": "000000150b010200003fc00000c0100000000000e891bf9908",
+    "fields": {
+      "phase": 1,
+      "flags": 2,
+      "dx": 1.5,
+      "dy": -2.25,
+      "tsMicros": 998877665544
+    }
   }
 }

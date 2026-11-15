@@ -8,9 +8,15 @@ import android.view.SurfaceView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import app.mirage.input.InputView
+import app.mirage.input.TouchFrame
 
 class AspectSurfaceView @JvmOverloads constructor(
     context: Context,
@@ -55,12 +61,16 @@ class AspectSurfaceView @JvmOverloads constructor(
 fun VideoView(
     modifier: Modifier = Modifier,
     onSurfaceReady: (AspectSurfaceView, Surface) -> Unit,
-    onSurfaceDestroyed: () -> Unit = {}
+    onSurfaceDestroyed: () -> Unit = {},
+    inputEnabled: Boolean = false,
+    onInputFrame: ((TouchFrame) -> Unit)? = null
 ) {
+    var surfaceRef by remember { mutableStateOf<AspectSurfaceView?>(null) }
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         AndroidView(
             factory = { context ->
                 AspectSurfaceView(context).apply {
+                    surfaceRef = this
                     val surfaceView = this
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
@@ -81,5 +91,16 @@ fun VideoView(
                 }
             }
         )
+        if (inputEnabled) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context -> InputView(context) },
+                update = { view ->
+                    view.surfaceView = surfaceRef
+                    view.onFrame = onInputFrame
+                    view.inputEnabled = inputEnabled
+                }
+            )
+        }
     }
 }

@@ -61,6 +61,14 @@ public final class VideoEncoder: @unchecked Sendable {
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
 
+    public func setBitrate(_ bitrate: Int) {
+        setProperty(kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate))
+        setProperty(
+            kVTCompressionPropertyKey_DataRateLimits,
+            [NSNumber(value: bitrate / 8), NSNumber(value: 1)] as CFArray
+        )
+    }
+
     public func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, forceKeyframe: Bool) throws {
         guard let session else { return }
         let frameProperties: CFDictionary? = forceKeyframe

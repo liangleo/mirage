@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Darwin
 import MirageCore
+import MirageHelper
 import ServiceManagement
 
 private func centerWindowOnPrimaryScreen(title: String) {
@@ -26,7 +27,8 @@ struct MirageMenuApp: App {
         Window("Mirage", id: "main") {
             MainView(controller: controller)
         }
-        .defaultSize(width: 520, height: 780)
+        .defaultSize(width: 520, height: 900)
+        .windowResizability(.contentMinSize)
 
         MenuBarExtra("Mirage", systemImage: "display") {
             StatusMenu(controller: controller)
@@ -54,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let mode = HelperController.Mode(rawValue: arguments[index + 1]) {
             HelperController.shared.setMode(mode)
             HelperController.shared.start()
-        } else if HelperController.shared.autoStartOnLaunch {
+        } else if HelperController.shared.autoStartOnLaunch || HelperController.shared.wifiEnabled {
             HelperController.shared.start()
         }
 
@@ -98,6 +100,9 @@ struct StatusMenu: View {
         }
         Button(controller.usbEnabled ? "停止 USB 连接" : "USB 连接（AOA）") {
             controller.setUsbBridge(!controller.usbEnabled)
+        }
+        Button(controller.wifiEnabled ? "关闭 Wi-Fi 连接" : "Wi-Fi 连接（局域网）") {
+            controller.setWifiEnabled(!controller.wifiEnabled)
         }
         Divider()
         Button {
@@ -195,6 +200,12 @@ struct MainView: View {
                 ))
                 .toggleStyle(.switch)
 
+                Toggle("Wi-Fi 连接（局域网）", isOn: Binding(
+                    get: { controller.wifiEnabled },
+                    set: { controller.setWifiEnabled($0) }
+                ))
+                .toggleStyle(.switch)
+
                 Toggle("登录时自动启动 Mirage", isOn: Binding(
                     get: { controller.launchAtLogin },
                     set: { controller.setLaunchAtLogin($0) }
@@ -245,6 +256,69 @@ struct MainView: View {
                 .padding(8)
             }
 
+            GroupBox("输入控制") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(controller.accessibilityGranted ? Color.green : Color.orange)
+                            .frame(width: 8, height: 8)
+                        Text(controller.accessibilityGranted ? "辅助功能已授权" : "需要辅助功能授权（键盘注入）")
+                        Spacer()
+                        Button(controller.accessibilityGranted ? "打开设置" : "去授权") {
+                            controller.requestAccessibility()
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(controller.secureInput ? Color.orange : Color.green)
+                            .frame(width: 8, height: 8)
+                        Text(controller.secureInput ? "安全输入已开启，键盘暂停注入" : "未检测到安全输入")
+                            .foregroundStyle(.secondary)
+                    }
+                    Toggle("输入暂停", isOn: Binding(
+                        get: { controller.inputPaused },
+                        set: { controller.setInputPaused($0) }
+                    ))
+                    .toggleStyle(.switch)
+                }
+                .padding(8)
+            }
+
+            if controller.wifiEnabled {
+                GroupBox("扫码配对（Wi-Fi）") {
+                    if let pairing = controller.pairing {
+                        HStack(alignment: .top, spacing: 12) {
+                            if let image = makeQRCode(for: pairing) {
+                                Image(nsImage: image)
+                                    .interpolation(.none)
+                                    .resizable()
+                                    .frame(width: 150, height: 150)
+                                    .background(Color.white)
+                            }
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(verbatim: "\(pairing.host):\(pairing.port)")
+                                    .font(.system(.body, design: .monospaced))
+                                Text("指纹 \(pairing.fingerprintHex.prefix(8))")
+                                    .foregroundStyle(.secondary)
+                                Button("复制配对链接") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(
+                                        pairing.encodeURL()?.absoluteString ?? "",
+                                        forType: .string
+                                    )
+                                }
+                            }
+                            Spacer()
+                        }
+                        .padding(6)
+                    } else {
+                        Text("启动 Wi-Fi 服务后显示二维码")
+                            .foregroundStyle(.secondary)
+                            .padding(6)
+                    }
+                }
+            }
+
             HStack {
                 Button("日志文件") {
                     NSWorkspace.shared.open(controller.logURL)
@@ -266,7 +340,7 @@ struct MainView: View {
                         .foregroundStyle(.secondary)
                 }
                 LogView(logURL: controller.logURL)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             }
 
@@ -281,7 +355,7 @@ struct MainView: View {
             }
         }
         .padding(20)
-        .frame(width: 520, height: 780)
+        .frame(width: 520)
         .onAppear {
             centerWindowOnPrimaryScreen(title: "Mirage")
         }
@@ -416,10 +490,15 @@ final class HelperController: ObservableObject {
     @Published private(set) var fps: Int
     @Published private(set) var autoStartOnLaunch: Bool
     @Published private(set) var usbEnabled: Bool
+    @Published private(set) var wifiEnabled: Bool
     @Published private(set) var launchAtLogin: Bool
     @Published private(set) var isRunning = false
     @Published private(set) var usbBridgeRunning = false
     @Published private(set) var status = "未运行"
+    @Published private(set) var pairing: PairingPayload?
+    @Published private(set) var inputPaused = false
+    @Published private(set) var accessibilityGranted = false
+    @Published private(set) var secureInput = false
 
     let logURL: URL
 
@@ -428,6 +507,7 @@ final class HelperController: ObservableObject {
     private var bridgeProcess: Process?
     private var monitorTimer: Timer?
     private var instanceLockFD: Int32 = -1
+    private lazy var tlsIdentity = try? TLSIdentity.loadOrCreate()
 
     private init() {
         let autoDefaultKey = "resolutionDefaultAutoV1"
@@ -453,7 +533,12 @@ final class HelperController: ObservableObject {
         let savedFPS = UserDefaults.standard.integer(forKey: "fps")
         fps = Self.frameRates.contains(savedFPS) ? savedFPS : 60
         autoStartOnLaunch = UserDefaults.standard.bool(forKey: "autoStartOnLaunch")
-        usbEnabled = UserDefaults.standard.bool(forKey: "usbEnabled")
+        let storedUsb = UserDefaults.standard.bool(forKey: "usbEnabled")
+        usbEnabled = storedUsb
+        wifiEnabled = storedUsb ? false : UserDefaults.standard.bool(forKey: "wifiEnabled")
+        if storedUsb {
+            UserDefaults.standard.set(false, forKey: "wifiEnabled")
+        }
         launchAtLogin = SMAppService.mainApp.status == .enabled
 
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
@@ -476,6 +561,8 @@ final class HelperController: ObservableObject {
     }
 
     private func refreshExternalState() {
+        refreshPairing()
+        refreshInputState()
         guard process == nil else { return }
 
         if let pid = listeningHelperPID() {
@@ -488,6 +575,31 @@ final class HelperController: ObservableObject {
             externalHelperPID = nil
             isRunning = false
             status = "已停止"
+        }
+    }
+
+    private func refreshInputState() {
+        let paused = InputControl.isPaused
+        let granted = InputControl.accessibilityGranted
+        let secure = InputControl.secureInput
+        if inputPaused != paused { inputPaused = paused }
+        if accessibilityGranted != granted { accessibilityGranted = granted }
+        if secureInput != secure { secureInput = secure }
+    }
+
+    func setInputPaused(_ paused: Bool) {
+        InputControl.setPaused(paused)
+        inputPaused = paused
+    }
+
+    func requestAccessibility() {
+        InputInjector.requestAccessibility()
+        openAccessibilitySettings()
+    }
+
+    func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -589,13 +701,46 @@ final class HelperController: ObservableObject {
     }
 
     func setUsbBridge(_ enabled: Bool) {
-        usbEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "usbEnabled")
         if enabled {
+            let wasWifi = wifiEnabled
+            usbEnabled = true
+            wifiEnabled = false
+            UserDefaults.standard.set(true, forKey: "usbEnabled")
+            UserDefaults.standard.set(false, forKey: "wifiEnabled")
+            if isRunning {
+                if wasWifi {
+                    restart()
+                }
+            } else {
+                start()
+            }
             startUsbBridge()
         } else {
+            usbEnabled = false
+            UserDefaults.standard.set(false, forKey: "usbEnabled")
             stopUsbBridge()
             status = "USB 连接已关闭 · 如手机仍在 accessory 模式请拔插 USB"
+        }
+    }
+
+    func setWifiEnabled(_ enabled: Bool) {
+        guard enabled != wifiEnabled else { return }
+        wifiEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "wifiEnabled")
+        if enabled {
+            let wasUsb = usbEnabled
+            usbEnabled = false
+            UserDefaults.standard.set(false, forKey: "usbEnabled")
+            if wasUsb {
+                stopUsbBridge()
+            }
+            if isRunning {
+                restart()
+            } else {
+                start()
+            }
+        } else if isRunning {
+            restart()
         }
     }
 
@@ -711,6 +856,9 @@ final class HelperController: ObservableObject {
         let child = Process()
         child.executableURL = helper
         var arguments = ["--mode", mode.rawValue, "--port", "7777", "--fps", "\(fps)"]
+        if wifiEnabled {
+            arguments.append("--wifi")
+        }
         if mode == .extend {
             if resolution.isAuto {
                 arguments += ["--auto-size"]
@@ -799,6 +947,64 @@ final class HelperController: ObservableObject {
                 self?.start()
             }
         }
+    }
+
+    private func refreshPairing() {
+        guard wifiEnabled, let identity = tlsIdentity, let host = primaryIPv4Address() else {
+            pairing = nil
+            return
+        }
+        let payload = PairingPayload(
+            host: host,
+            port: 7778,
+            fingerprint: identity.fingerprint,
+            name: Host.current().localizedName ?? "Mac",
+            deviceID: pairingDeviceID
+        )
+        if payload != pairing {
+            pairing = payload
+        }
+    }
+
+    private var pairingDeviceID: UUID {
+        if let text = UserDefaults.standard.string(forKey: "pairingDeviceID"),
+           let id = UUID(uuidString: text) {
+            return id
+        }
+        let id = UUID()
+        UserDefaults.standard.set(id.uuidString, forKey: "pairingDeviceID")
+        return id
+    }
+
+    private func primaryIPv4Address() -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let interface = pointer.pointee
+            guard let address = interface.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let name = String(cString: interface.ifa_name)
+            guard name.hasPrefix("en") else { continue }
+            let flags = Int32(bitPattern: interface.ifa_flags)
+            guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
+
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                address,
+                socklen_t(address.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            if result == 0 {
+                return String(cString: host)
+            }
+        }
+        return nil
     }
 
     private func openAppendLog() -> FileHandle? {

@@ -3,6 +3,8 @@ import Darwin
 import CoreGraphics
 import CoreMedia
 import CoreVideo
+import ApplicationServices
+import Carbon.HIToolbox
 import MirageCore
 import MirageHelper
 
@@ -47,22 +49,73 @@ if arguments.contains("--list-displays") {
         print("encoder_error=\(error)")
         exit(1)
     }
+} else if arguments.contains("--input-selftest") {
+    let trusted = AXIsProcessTrusted()
+    let secure = IsSecureEventInputEnabled()
+    print("input_accessibility=\(trusted ? 1 : 0)")
+    print("secure_input=\(secure ? 1 : 0)")
+    exit(0)
+} else if arguments.contains("--tls-selftest") {
+    guard let tls = try? TLSIdentity.loadOrCreate() else {
+        print("tls_load=failed")
+        exit(1)
+    }
+    print("fingerprint=\(PairingPayload(host: "x", port: 1, fingerprint: tls.fingerprint, name: "x", deviceID: UUID()).fingerprintHex)")
+    fflush(stdout)
+    var key: SecKey?
+    let status = SecIdentityCopyPrivateKey(tls.identity, &key)
+    print("copy_key_status=\(status)")
+    fflush(stdout)
+    guard status == errSecSuccess, let key else { exit(2) }
+    var error: Unmanaged<CFError>?
+    let signature = SecKeyCreateSignature(key, .ecdsaSignatureMessageX962SHA256, Data("test".utf8) as CFData, &error)
+    print("sign=\(signature != nil) error=\(String(describing: error))")
+    fflush(stdout)
+    exit(signature != nil ? 0 : 3)
 } else if arguments.contains("--serve-selftest") {
     let config = SessionConfig(width: 1280, height: 800, fps: 60, codec: 1, bitrate: 20_000_000, rotation: 0)
-    let server = MirageServer(port: 7777, config: config)
+    let tls = arguments.contains("--tls") ? try? TLSIdentity.loadOrCreate() : nil
+    let server = MirageServer(
+        port: 7777,
+        config: config,
+        bindAddress: tls == nil ? .ipv4(.loopback) : nil,
+        serviceName: tls == nil ? nil : "Mirage",
+        tlsIdentity: tls?.identity
+    )
     server.onLog = { message in
         print(message)
         fflush(stdout)
     }
+    server.inputCaps = 0b111111
+    server.inputAllowed = { _ in true }
+    server.inputPaused = { InputControl.isPaused }
+    server.onInput = { event in
+        switch event {
+        case .pointer(let samples):
+            let kinds = samples.map { $0.kind.rawValue }.map(String.init).joined(separator: ",")
+            let points = samples.map { String(format: "%.3f,%.3f b=%u", $0.x, $0.y, $0.buttons) }.joined(separator: " ")
+            print("input_pointer count=\(samples.count) kinds=\(kinds) \(points)")
+        case .key(let key):
+            print("input_key action=\(key.action.rawValue) keycode=\(key.keycode) unicode=\(key.unicode) modifiers=\(key.modifiers)")
+        case .text(let text):
+            print("input_text text=\(text.text)")
+        case .scroll(let scroll):
+            print("input_scroll phase=\(scroll.phase.rawValue) dx=\(scroll.dx) dy=\(scroll.dy) flags=\(scroll.flags)")
+        case .releaseAll:
+            print("input_release_all")
+        }
+        fflush(stdout)
+    }
     do {
         try server.start()
-        print("listening=127.0.0.1:7777")
+        print(tls == nil ? "listening=127.0.0.1:7777" : "listening=0.0.0.0:7778 tls=1")
         fflush(stdout)
     } catch {
         print("server_error=\(error)")
         exit(1)
     }
-    RunLoop.current.run(until: Date(timeIntervalSinceNow: 10))
+    let seconds = argumentValue("--seconds").flatMap { Double($0) } ?? 30
+    Thread.sleep(forTimeInterval: seconds)
     server.stop()
 } else {
     let displayID = argumentValue("--display").flatMap { UInt32($0) } ?? CGMainDisplayID()
@@ -75,6 +128,7 @@ if arguments.contains("--list-displays") {
     let pointWidth = argumentValue("--width").flatMap { Int($0) } ?? 1280
     let pointHeight = argumentValue("--height").flatMap { Int($0) } ?? 800
     let autoSize = arguments.contains("--auto-size")
+    let wifi = arguments.contains("--wifi")
     let position = DisplayPosition(rawValue: argumentValue("--position") ?? "right") ?? .right
     let dumpFramePath = argumentValue("--dump-frame")
     let recordPath = argumentValue("--record")
@@ -91,6 +145,7 @@ if arguments.contains("--list-displays") {
         pointHeight: pointHeight,
         autoSize: autoSize,
         position: position,
+        wifi: wifi,
         dumpFramePath: dumpFramePath,
         recordPath: recordPath
     )

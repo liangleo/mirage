@@ -28,4 +28,16 @@ final class KeyframeControllerTests: XCTestCase {
         XCTAssertTrue(controller.shouldForce(nowMicros: 1_600_000))
         XCTAssertFalse(controller.shouldForce(nowMicros: 1_700_000))
     }
+
+    func testRequestIfDueRespectsInterval() {
+        let controller = KeyframeController()
+        XCTAssertTrue(controller.shouldForce(nowMicros: 1_000_000))
+        controller.noteKeyframe(nowMicros: 1_000_000)
+
+        XCTAssertFalse(controller.requestIfDue(nowMicros: 1_500_000))
+        XCTAssertFalse(controller.shouldForce(nowMicros: 1_500_000))
+
+        XCTAssertTrue(controller.requestIfDue(nowMicros: 3_000_000))
+        XCTAssertTrue(controller.shouldForce(nowMicros: 3_000_000))
+    }
 }

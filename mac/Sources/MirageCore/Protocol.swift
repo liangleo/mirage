@@ -9,6 +9,19 @@ public enum MessageType: UInt8 {
     case ctrl = 6
     case ping = 7
     case bye = 8
+    case key = 9
+    case text = 10
+    case scroll = 11
+    case udpConfig = 12
+}
+
+public enum CtrlCode {
+    public static let requestKeyframe: UInt8 = 1
+    public static let releaseAll: UInt8 = 2
+    public static let inputEnabled: UInt8 = 3
+    public static let inputDisabled: UInt8 = 4
+    public static let udpFailed: UInt8 = 5
+    public static let udpReady: UInt8 = 6
 }
 
 public struct Frame: Equatable, Sendable {
@@ -80,6 +93,14 @@ extension Data {
         for shift in stride(from: 56, through: 0, by: -8) {
             append(UInt8((value >> UInt64(shift)) & 0xff))
         }
+    }
+
+    mutating func appendFloatBE(_ value: Float) {
+        appendUInt32BE(value.bitPattern)
+    }
+
+    func readFloatBE(_ offset: Int) -> Float {
+        Float(bitPattern: readUInt32BE(offset))
     }
 
     func readUInt16BE(_ offset: Int) -> UInt16 {

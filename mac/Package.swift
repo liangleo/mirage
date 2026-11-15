@@ -9,6 +9,7 @@ let package = Package(
         .executable(name: "mirage-helper", targets: ["MirageHelperCLI"]),
         .executable(name: "mirage-menu", targets: ["MirageMenu"]),
     ],
+    dependencies: [],
     targets: [
         .target(name: "MirageCore"),
         .target(
@@ -24,7 +25,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "MirageMenu",
-            dependencies: ["MirageCore"],
+            dependencies: ["MirageCore", "MirageHelper"],
             path: "Sources/MirageMenu"
         ),
         .testTarget(name: "MirageCoreTests", dependencies: ["MirageCore", "MirageHelper"]),

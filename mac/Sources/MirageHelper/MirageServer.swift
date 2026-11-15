@@ -1,5 +1,7 @@
 import Foundation
 import Network
+import Security
+import CryptoKit
 import Darwin
 import MirageCore
 
@@ -7,6 +9,7 @@ public enum ServerError: Error {
     case invalidPort(UInt16)
     case notReady
     case failed(Error)
+    case tlsUnavailable
 }
 
 private final class StartResult: @unchecked Sendable {
@@ -30,34 +33,130 @@ public final class MirageServer: @unchecked Sendable {
     public var onKeyframeRequest: (() -> Void)?
     public var onLog: ((String) -> Void)?
     public var onHello: ((Hello) -> Void)?
+    public var onFeedback: ((Feedback) -> Void)?
+    public var onInput: (@Sendable (InputEvent) -> Void)?
+    public var inputAllowed: (@Sendable (Data) -> Bool)?
+    public var inputPaused: @Sendable () -> Bool = { false }
+    public var inputCaps: UInt8 = 0b111111
 
     private let port: UInt16
     private let session: Session
     private let sender = FrameSender()
+    private let bindAddress: NWEndpoint.Host?
+    private let serviceName: String?
+    private let tlsIdentity: SecIdentity?
     private let queue = DispatchQueue(label: "app.mirage.server")
     private var listener: NWListener?
+    private var tlsListener: NWListener?
     private var connection: NWConnection?
     private var decoder = FrameDecoder()
     private var keepalive: DispatchSourceTimer?
+    private var udpSender: UdpVideoSender?
+    private var udpPeerReady = false
+    private var lastFeedbackMicros: UInt64 = 0
+    private var clientDeviceID: Data?
+    private var inputDisabledSent = false
+    private var connectionSecure = false
+    private var inputRate = InputRateLimiter()
+    private var inputWasPaused = false
+    public private(set) var udpConfig: UdpConfig?
 
-    public init(port: UInt16, config: SessionConfig) {
+    public var tlsPort: UInt16 { port + 1 }
+
+    public init(
+        port: UInt16,
+        config: SessionConfig,
+        bindAddress: NWEndpoint.Host? = .ipv4(.loopback),
+        serviceName: String? = nil,
+        tlsIdentity: SecIdentity? = nil
+    ) {
         self.port = port
         self.session = Session(config: config)
+        self.bindAddress = bindAddress
+        self.serviceName = serviceName
+        self.tlsIdentity = tlsIdentity
     }
 
     public func start() throws {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw ServerError.invalidPort(port)
         }
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
-        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: 0)
 
-        let listener = try NWListener(using: parameters, on: nwPort)
+        let plainParameters = NWParameters.tcp
+        plainParameters.allowLocalEndpointReuse = true
+        let plainHost: NWEndpoint.Host = bindAddress ?? .ipv4(.loopback)
+        plainParameters.requiredLocalEndpoint = .hostPort(host: plainHost, port: 0)
+        listener = try startListener(parameters: plainParameters, on: nwPort, serviceName: nil, txtRecord: Data())
+
+        if let tlsIdentity {
+            guard let tlsPortValue = NWEndpoint.Port(rawValue: tlsPort),
+                  let secIdentity = sec_identity_create(tlsIdentity) else {
+                throw ServerError.tlsUnavailable
+            }
+            let tlsOptions = NWProtocolTLS.Options()
+            sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, secIdentity)
+            sec_protocol_options_set_min_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv12)
+            let tlsParameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+            tlsParameters.allowLocalEndpointReuse = true
+            tlsListener = try startListener(
+                parameters: tlsParameters,
+                on: tlsPortValue,
+                serviceName: serviceName,
+                txtRecord: pairingTXTRecord(),
+                secure: true
+            )
+        } else if serviceName != nil {
+            onLog?("warning: mDNS advertised without TLS")
+        }
+
+        if tlsIdentity != nil {
+            let key = randomData(count: 32)
+            let noncePrefix = randomData(count: 4)
+            let config = UdpConfig(
+                port: tlsPort,
+                cipher: .aes256GCM,
+                key: key,
+                noncePrefix: noncePrefix,
+                flags: 1
+            )
+            udpConfig = config
+            let sender = UdpVideoSender(port: tlsPort, key: key, noncePrefix: noncePrefix)
+            sender.onLog = onLog
+            sender.onPeerReady = { [weak self] in
+                self?.udpPeerReady = true
+            }
+            try sender.start()
+            udpSender = sender
+        }
+
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
+        timer.setEventHandler { [weak self] in
+            self?.keepaliveTick()
+        }
+        timer.resume()
+        keepalive = timer
+    }
+
+    private func startListener(
+        parameters: NWParameters,
+        on port: NWEndpoint.Port,
+        serviceName: String?,
+        txtRecord: Data,
+        secure: Bool = false
+    ) throws -> NWListener {
+        let listener = try NWListener(using: parameters, on: port)
+        if let serviceName {
+            listener.service = NWListener.Service(
+                name: serviceName,
+                type: "_mirage._tcp",
+                txtRecord: txtRecord
+            )
+        }
         let ready = DispatchSemaphore(value: 0)
         let startResult = StartResult()
         listener.newConnectionHandler = { [weak self] connection in
-            self?.accept(connection)
+            self?.accept(connection, secure: secure)
         }
         listener.stateUpdateHandler = { [weak self] state in
             self?.onLog?("listener state=\(state)")
@@ -73,33 +172,29 @@ public final class MirageServer: @unchecked Sendable {
                 break
             }
         }
-        self.listener = listener
         listener.start(queue: queue)
 
         if ready.wait(timeout: .now() + 5) == .timedOut {
             listener.cancel()
-            self.listener = nil
             throw ServerError.notReady
         }
         if let error = startResult.get() {
             listener.cancel()
-            self.listener = nil
             throw ServerError.failed(error)
         }
-
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
-        timer.setEventHandler { [weak self] in
-            self?.keepaliveTick()
-        }
-        timer.resume()
-        keepalive = timer
+        return listener
     }
 
     public func broadcast(_ encoded: EncodedFrame) {
         let frame = makeVideoFrame(encoded.header, annexB: encoded.data)
         queue.async { [weak self] in
             guard let self, let connection = self.connection else { return }
+
+            if self.udpPeerReady, let udpSender = self.udpSender {
+                self.session.noteOutbound(nowMicros: monotonicMicros())
+                udpSender.send(frame: encoded)
+                return
+            }
 
             let wasWaiting = self.sender.isWaitingForKeyframe
             let accepted = self.sender.enqueue(encoded)
@@ -119,15 +214,47 @@ public final class MirageServer: @unchecked Sendable {
     public func stop() {
         keepalive?.cancel()
         keepalive = nil
+        onInput?(.releaseAll)
         queue.async { [weak self] in
             self?.connection?.cancel()
             self?.connection = nil
             self?.listener?.cancel()
             self?.listener = nil
+            self?.tlsListener?.cancel()
+            self?.tlsListener = nil
+            self?.udpSender?.stop()
+            self?.udpSender = nil
+            self?.udpPeerReady = false
         }
     }
 
-    private func accept(_ newConnection: NWConnection) {
+    private func pairingTXTRecord() -> Data {
+        guard let tlsIdentity else { return Data() }
+        var certificate: SecCertificate?
+        guard SecIdentityCopyCertificate(tlsIdentity, &certificate) == errSecSuccess,
+              let certificate else {
+            return Data()
+        }
+        let der = SecCertificateCopyData(certificate) as Data
+        let fingerprint = Data(SHA256.hash(data: der))
+
+        var record = Data()
+        let pairs = [
+            ("v", "1"),
+            ("fp", fingerprint.map { String(format: "%02x", $0) }.joined()),
+            ("name", Host.current().localizedName ?? "Mac"),
+        ]
+        for (key, value) in pairs {
+            let entry = Data("\(key)=\(value)".utf8)
+            guard entry.count <= 255 else { continue }
+            record.append(UInt8(entry.count))
+            record.append(entry)
+        }
+        return record
+    }
+
+    private func accept(_ newConnection: NWConnection, secure: Bool) {
+        onLog?("accept remote=\(String(describing: newConnection.endpoint)) secure=\(secure)")
         if connection != nil {
             onLog?("rejecting extra connection")
             newConnection.cancel()
@@ -135,17 +262,27 @@ public final class MirageServer: @unchecked Sendable {
         }
         connection = newConnection
         decoder = FrameDecoder()
+        lastFeedbackMicros = 0
+        clientDeviceID = nil
+        inputDisabledSent = false
+        connectionSecure = secure
         sender.awaitKeyframe()
         onKeyframeRequest?()
 
         newConnection.stateUpdateHandler = { [weak self, weak newConnection] state in
             guard let self, let newConnection else { return }
+            self.onLog?("connection state=\(state)")
             switch state {
             case .ready:
                 self.onLog?("client connected")
+                if let udpConfig = self.udpConfig {
+                    self.send(encodeUdpConfig(udpConfig), on: newConnection)
+                }
                 self.receive(on: newConnection)
             case .failed, .cancelled:
                 self.onLog?("client disconnected")
+                self.udpPeerReady = false
+                self.onInput?(.releaseAll)
                 if self.connection === newConnection {
                     self.connection = nil
                 }
@@ -187,9 +324,31 @@ public final class MirageServer: @unchecked Sendable {
     }
 
     private func handle(_ frame: Frame, on connection: NWConnection) {
+        if frame.type == MessageType.ctrl.rawValue, let code = frame.payload.first {
+            if code == CtrlCode.udpFailed {
+                udpPeerReady = false
+                onLog?("udp failed; falling back to TCP video")
+            } else if code == CtrlCode.udpReady {
+                onLog?("udp ready")
+            }
+        }
+
         if frame.type == MessageType.hello.rawValue,
            let hello = try? decodeHello(frame.payload) {
+            clientDeviceID = hello.deviceID
+            session.inputCaps = advertisedInputCaps
+            inputDisabledSent = false
+            onLog?("hello screen=\(hello.screenWidth)x\(hello.screenHeight) caps=\(session.inputCaps)")
             onHello?(hello)
+        }
+
+        if frame.type == MessageType.feedback.rawValue,
+           let feedback = try? decodeFeedback(frame.payload) {
+            let now = monotonicMicros()
+            if now - lastFeedbackMicros >= 100_000 {
+                lastFeedbackMicros = now
+                onFeedback?(feedback)
+            }
         }
 
         for action in session.handle(frame, nowMicros: monotonicMicros()) {
@@ -198,19 +357,96 @@ public final class MirageServer: @unchecked Sendable {
                 send(outbound, on: connection)
             case .close(let reason):
                 onLog?("closing: \(reason)")
+                onInput?(.releaseAll)
                 connection.cancel()
             case .requestKeyframe:
                 onKeyframeRequest?()
+            case .inject(let event):
+                deliverInput(event, on: connection)
             }
         }
     }
 
+    private var advertisedInputCaps: UInt8 {
+        if connectionSecure || bindAddress == .ipv4(.loopback) {
+            return inputCaps
+        }
+        return 0
+    }
+
+    private func deliverInput(_ event: InputEvent, on connection: NWConnection) {
+        if case .releaseAll = event {
+            onInput?(event)
+            return
+        }
+        let allowed = clientDeviceID.map { inputAllowed?($0) ?? true } ?? true
+        let paused = inputPaused()
+        if paused && !inputWasPaused {
+            onInput?(.releaseAll)
+        }
+        inputWasPaused = paused
+        if let reason = InputGate.disabledReason(
+            caps: session.inputCaps,
+            paused: paused,
+            allowed: allowed
+        ) {
+            sendInputDisabled(reason: reason, on: connection)
+            return
+        }
+        guard allowInputRate() else { return }
+        onInput?(event)
+    }
+
+    private func allowInputRate() -> Bool {
+        inputRate.allow(now: monotonicMicros())
+    }
+
+    private func sendInputDisabled(reason: UInt8, on connection: NWConnection) {
+        guard !inputDisabledSent else { return }
+        inputDisabledSent = true
+        let messages: [UInt8: String] = [
+            1: "此设备未授权控制 Mac",
+            2: "输入已暂停",
+            3: "当前链路不允许输入",
+        ]
+        let text = Data((messages[reason] ?? "输入不可用").utf8)
+        onLog?("input disabled reason=\(reason)")
+        var payload = Data([CtrlCode.inputDisabled, UInt8(text.count)])
+        payload.append(text)
+        send(Frame(type: MessageType.ctrl.rawValue, payload: payload), on: connection)
+    }
+
     private func keepaliveTick() {
         guard let connection else { return }
+        syncInputGate(on: connection)
         for action in session.tick(nowMicros: monotonicMicros()) {
             if case .send(let frame) = action {
                 send(frame, on: connection)
             }
+        }
+    }
+
+    // The client stops sending input frames entirely while the server has
+    // reported input disabled, so state changes must be pushed proactively
+    // rather than piggybacked on the next input event.
+    private func syncInputGate(on connection: NWConnection) {
+        let allowed = clientDeviceID.map { inputAllowed?($0) ?? true } ?? true
+        let paused = inputPaused()
+        if paused && !inputWasPaused {
+            onInput?(.releaseAll)
+        }
+        inputWasPaused = paused
+        let reason = InputGate.disabledReason(
+            caps: session.inputCaps,
+            paused: paused,
+            allowed: allowed
+        )
+        if let reason {
+            sendInputDisabled(reason: reason, on: connection)
+        } else if inputDisabledSent {
+            inputDisabledSent = false
+            onLog?("input enabled")
+            send(Frame(type: MessageType.ctrl.rawValue, payload: Data([CtrlCode.inputEnabled])), on: connection)
         }
     }
 
@@ -227,4 +463,34 @@ public final class MirageServer: @unchecked Sendable {
             }
         )
     }
+}
+
+struct InputRateLimiter {
+    private var windowStart: UInt64 = 0
+    private var count = 0
+
+    mutating func allow(now: UInt64, limit: Int = 500) -> Bool {
+        if now < windowStart || now - windowStart >= 1_000_000 {
+            windowStart = now
+            count = 0
+        }
+        count += 1
+        return count <= limit
+    }
+}
+
+enum InputGate {
+    static func disabledReason(caps: UInt8, paused: Bool, allowed: Bool) -> UInt8? {
+        if caps == 0 { return 3 }
+        if paused { return 2 }
+        if !allowed { return 1 }
+        return nil
+    }
+}
+
+private func randomData(count: Int) -> Data {
+    var bytes = [UInt8](repeating: 0, count: count)
+    let status = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
+    precondition(status == errSecSuccess, "SecRandomCopyBytes failed")
+    return Data(bytes)
 }

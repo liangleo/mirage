@@ -14,6 +14,7 @@ import android.app.PendingIntent
 import android.util.DisplayMetrics
 import android.view.Surface
 import android.view.WindowManager
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -41,8 +42,10 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -55,6 +58,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,8 +69,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import app.mirage.input.InputController
+import app.mirage.input.KeyboardBridge
+import app.mirage.input.TouchFrame
 import app.mirage.net.Hello
+import app.mirage.net.MdnsDiscovery
+import app.mirage.net.PairingPayload
+import app.mirage.net.FakeUsbStreamConnection
+import app.mirage.net.TlsStreamConnection
+import app.mirage.net.TransportKind
+import app.mirage.net.TransportMode
+import app.mirage.net.TransportSelector
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import app.mirage.net.MirageClient
 import app.mirage.net.SessionConfig
 import app.mirage.net.StatsSnapshot
@@ -138,13 +156,37 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                UsbManager.ACTION_USB_ACCESSORY_ATTACHED -> {
+                    scheduleTransportSwitch()
+                }
+
                 UsbManager.ACTION_USB_ACCESSORY_DETACHED -> {
-                    if (usingUsb) {
-                        client?.close()
-                        client = null
-                        handleConnectionClosed("USB 已断开")
-                    }
                     pendingAccessory = null
+                    scheduleTransportSwitch()
+                }
+            }
+        }
+    }
+
+    private val transportModeKey = "transportMode"
+
+    private var transportMode by mutableStateOf(TransportMode.AUTO)
+    private var currentKind: TransportKind? = null
+    private var fakeUsbAttached = false
+    private var clientGeneration = 0
+    private var switchRunnable: Runnable? = null
+
+    private val debugReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (!BuildConfig.DEBUG) return
+            when (intent.action) {
+                "app.mirage.DEBUG_USB_ATTACHED" -> {
+                    fakeUsbAttached = true
+                    scheduleTransportSwitch()
+                }
+                "app.mirage.DEBUG_USB_DETACHED" -> {
+                    fakeUsbAttached = false
+                    scheduleTransportSwitch()
                 }
             }
         }
@@ -152,6 +194,7 @@ class MainActivity : ComponentActivity() {
 
     private var savedHost = ""
     private var savedPort = 0
+    private var savedFingerprintHex = ""
     private var lastHost: String? = null
     private var lastPort: Int = 0
     private var autoReconnectEnabled = false
@@ -174,7 +217,16 @@ class MainActivity : ComponentActivity() {
     private var videoWidth by mutableStateOf(0)
     private var videoHeight by mutableStateOf(0)
     private var status by mutableStateOf("未连接")
+    private var transportInfo by mutableStateOf("")
     private var showSettings by mutableStateOf(false)
+    private var inputCaps by mutableStateOf(0)
+    private var inputAllowed by mutableStateOf(false)
+    private var inputUserEnabled by mutableStateOf(true)
+    private var inputReason by mutableStateOf<String?>(null)
+    private var keyboardVisible by mutableStateOf(false)
+    private val inputSender = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val inputController = InputController(send = { frame -> inputSender.execute { client?.sendInput(frame) } })
+    private var keyboardBridge: KeyboardBridge? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -185,14 +237,30 @@ class MainActivity : ComponentActivity() {
             usbReceiver,
             IntentFilter().apply {
                 addAction(usbPermissionAction)
+                addAction(UsbManager.ACTION_USB_ACCESSORY_ATTACHED)
                 addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+        if (BuildConfig.DEBUG) {
+            ContextCompat.registerReceiver(
+                this,
+                debugReceiver,
+                IntentFilter().apply {
+                    addAction("app.mirage.DEBUG_USB_ATTACHED")
+                    addAction("app.mirage.DEBUG_USB_DETACHED")
+                },
+                ContextCompat.RECEIVER_EXPORTED
+            )
+        }
 
         val preferences = getSharedPreferences("mirage", Context.MODE_PRIVATE)
         savedHost = preferences.getString("host", "") ?: ""
         savedPort = preferences.getInt("port", 0)
+        savedFingerprintHex = preferences.getString("fingerprint", "") ?: ""
+        transportMode = preferences.getString(transportModeKey, null)
+            ?.let { runCatching { TransportMode.valueOf(it) }.getOrNull() }
+            ?: TransportMode.AUTO
         val metrics = screenMetrics()
         phoneWidth = metrics.widthPixels
         phoneHeight = metrics.heightPixels
@@ -216,6 +284,10 @@ class MainActivity : ComponentActivity() {
                                 phoneHeight = phoneHeight,
                                 videoWidth = videoWidth,
                                 videoHeight = videoHeight,
+                                transportInfo = transportInfo,
+                                inputEnabled = connected && inputAllowed && inputUserEnabled && !controlsVisible,
+                                inputReason = inputReason,
+                                onInputFrame = { inputController.onFrame(it) },
                                 onSurfaceReady = { view, newSurface ->
                                     surfaceView = view
                                     surface = newSurface
@@ -281,6 +353,48 @@ class MainActivity : ComponentActivity() {
                                         modifier = Modifier.size(24.dp)
                                     )
                                 }
+                                IconButton(onClick = {
+                                    switchTransport(nextTransport(transportMode))
+                                }) {
+                                    Icon(
+                                        Icons.Default.Refresh,
+                                        contentDescription = "切换连接（${transportMode.name}）",
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                if (inputCaps and 6 != 0) {
+                                    IconButton(onClick = {
+                                        keyboardBridge?.toggle()
+                                    }) {
+                                        Icon(
+                                            Icons.Default.Edit,
+                                            contentDescription = if (keyboardVisible) "收起键盘" else "键盘",
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                    }
+                                }
+                                if (connected && inputCaps == 0) {
+                                    Text("输入未开放", color = Color(0xFFFFB74D), fontSize = 12.sp)
+                                }
+                                if (inputCaps and 1 != 0) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("输入", color = Color.White)
+                                        Switch(
+                                            checked = inputUserEnabled && inputAllowed,
+                                            onCheckedChange = {
+                                                inputUserEnabled = it
+                                                keyboardBridge?.enabled = it && inputAllowed && inputCaps and 6 != 0
+                                                if (!it) {
+                                                    inputController.releaseAll()
+                                                    keyboardBridge?.hide()
+                                                }
+                                            },
+                                            modifier = Modifier
+                                                .padding(start = 2.dp)
+                                                .scale(0.7f)
+                                        )
+                                    }
+                                }
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
                                         Icons.Default.Info,
@@ -327,14 +441,19 @@ class MainActivity : ComponentActivity() {
                 if (showSettings) {
                     SettingsDialog(
                         initialHost = savedHost.ifBlank { "127.0.0.1" },
-                        initialPort = if (savedPort > 0) savedPort.toString() else "7777",
+                        initialPort = if (savedPort > 0) savedPort.toString() else "7778",
+                        initialFingerprint = savedFingerprintHex,
+                        initialTransport = transportMode,
+                        onTransport = { switchTransport(it) },
                         onDismiss = { showSettings = false },
-                        onSave = { host, port ->
+                        onSave = { host, port, fingerprintHex ->
                             savedHost = host
                             savedPort = port
+                            savedFingerprintHex = fingerprintHex
                             preferences.edit()
                                 .putString("host", host)
                                 .putInt("port", port)
+                                .putString("fingerprint", fingerprintHex)
                                 .apply()
                             showSettings = false
                             connect(host, port)
@@ -343,6 +462,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+
+        keyboardBridge = KeyboardBridge(
+            this,
+            forward = { inputController.forward(it) },
+            onVisible = { keyboardVisible = it }
+        )
 
         if (configured || hasAccessory) {
             connect(savedHost, savedPort)
@@ -397,6 +522,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        switchTransportIfNeeded()
+        keyboardBridge?.enabled = connected && inputAllowed && inputUserEnabled &&
+            inputCaps and 6 != 0
+    }
+
+    override fun onPause() {
+        keyboardBridge?.hide()
+        inputController.releaseAll()
+        super.onPause()
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        val bridge = keyboardBridge
+        if (bridge != null && connected && inputAllowed && inputUserEnabled && bridge.dispatchKeyEvent(event)) {
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     private fun hideSystemBars() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -419,7 +565,17 @@ class MainActivity : ComponentActivity() {
             unregisterReceiver(usbReceiver)
         } catch (_: Exception) {
         }
+        if (BuildConfig.DEBUG) {
+            try {
+                unregisterReceiver(debugReceiver)
+            } catch (_: Exception) {
+            }
+        }
+        switchRunnable?.let { mainHandler.removeCallbacks(it) }
+        keyboardBridge?.destroy()
+        keyboardBridge = null
         disconnect()
+        inputSender.shutdown()
         super.onDestroy()
     }
 
@@ -437,37 +593,164 @@ class MainActivity : ComponentActivity() {
         client = null
 
         val accessory = findMirageAccessory()
-        if (accessory != null && !usbManager.hasPermission(accessory)) {
-            pendingAccessory = accessory
-            status = "等待 USB 授权…"
-            requestUsbPermission(accessory)
-            return
-        }
+        val hasAccessory = accessory != null || (BuildConfig.DEBUG && fakeUsbAttached)
+        val choice = TransportSelector.select(
+            transportMode,
+            hasAccessory,
+            host.takeIf { it.isNotBlank() },
+            port
+        )
+        currentKind = choice?.kind
 
-        if (accessory != null) {
-            status = if (isReconnect) "重连中…（USB）" else "连接中…（USB）"
-            startClient({ UsbStreamConnection(usbManager, accessory) }, usb = true)
-        } else {
-            status = if (isReconnect) "重连中…（第 $reconnectAttempts 次）" else "连接中…"
-            startClient({ TcpStreamConnection(host, port) }, usb = false)
+        when (choice?.kind) {
+            null -> {
+                connecting = false
+                status = "请先设置 Mac 地址或扫码配对"
+                showSettings = true
+            }
+
+            TransportKind.WAIT_USB -> {
+                connecting = false
+                status = "等待 USB 连接…（未检测到设备）"
+            }
+
+            TransportKind.USB -> {
+                if (accessory != null) {
+                    if (!usbManager.hasPermission(accessory)) {
+                        pendingAccessory = accessory
+                        status = "等待 USB 授权…"
+                        requestUsbPermission(accessory)
+                        return
+                    }
+                    status = if (isReconnect) "重连中…（USB）" else "连接中…（USB）"
+                    startClient(
+                        { UsbStreamConnection(usbManager, accessory) },
+                        TransportKind.USB,
+                        "USB"
+                    )
+                } else {
+                    status = if (isReconnect) "重连中…（USB 模拟）" else "连接中…（USB 模拟）"
+                    startClient({ FakeUsbStreamConnection() }, TransportKind.USB, "USB (模拟)")
+                }
+            }
+
+            TransportKind.WIFI -> {
+                val wifiHost = choice.host ?: host
+                val wifiPort = choice.port
+                if (isLoopbackHost(wifiHost)) {
+                    status = if (isReconnect) "重连中…（TCP）" else "连接中…（TCP）"
+                    startClient(
+                        { TcpStreamConnection(wifiHost, wifiPort) },
+                        TransportKind.WIFI,
+                        "TCP $wifiHost:$wifiPort"
+                    )
+                } else {
+                    val fingerprint = PairingPayload.decodeFingerprint(savedFingerprintHex)
+                    if (fingerprint == null) {
+                        connecting = false
+                        status = "请先扫码配对以确认 Mac 指纹"
+                        showSettings = true
+                        return
+                    }
+                    status = if (isReconnect) "重连中…（第 $reconnectAttempts 次）" else "连接中…"
+                    startClient(
+                        { TlsStreamConnection(wifiHost, wifiPort, fingerprint) },
+                        TransportKind.WIFI,
+                        "Wi-Fi $wifiHost:$wifiPort"
+                    )
+                }
+            }
+
+            TransportKind.TCP -> {
+                status = if (isReconnect) "重连中…（TCP）" else "连接中…（TCP）"
+                startClient(
+                    { TcpStreamConnection("127.0.0.1", 7777) },
+                    TransportKind.TCP,
+                    "TCP 127.0.0.1:7777"
+                )
+            }
         }
     }
 
-    private fun startClient(open: () -> StreamConnection, usb: Boolean) {
-        usingUsb = usb
+    private fun switchTransport(mode: TransportMode) {
+        if (mode == transportMode) return
+        transportMode = mode
+        getSharedPreferences("mirage", Context.MODE_PRIVATE).edit()
+            .putString(transportModeKey, mode.name)
+            .apply()
+        if (mode == TransportMode.WIFI && (savedHost.isBlank() || savedPort <= 0)) {
+            currentKind = null
+            connecting = false
+            status = "Wi-Fi 模式需要先设置地址或扫码配对"
+            showSettings = true
+            return
+        }
+        if (mode == TransportMode.TCP) {
+            lastHost = "127.0.0.1"
+            lastPort = 7777
+        }
+        reconnectTransport()
+    }
+
+    private fun scheduleTransportSwitch() {
+        switchRunnable?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable { switchTransportIfNeeded() }
+        switchRunnable = runnable
+        mainHandler.postDelayed(runnable, 500)
+    }
+
+    private fun switchTransportIfNeeded() {
+        if (transportMode == TransportMode.WIFI || transportMode == TransportMode.TCP) return
+        val hasAccessory = findMirageAccessory() != null || (BuildConfig.DEBUG && fakeUsbAttached)
+        val desired = TransportSelector.select(
+            transportMode,
+            hasAccessory,
+            savedHost,
+            savedPort
+        )?.kind ?: return
+        if (desired != currentKind) {
+            reconnectTransport()
+        }
+    }
+
+    private fun reconnectTransport() {
+        connecting = true
+        clientGeneration++
+        client?.close()
+        client = null
+        decoder?.release()
+        decoder = null
+        decoderSurface = null
+        config = null
+        pendingKeyframe = null
+        connected = false
         closeHandled = false
+        connect(lastHost ?: savedHost, lastPort.takeIf { it > 0 } ?: savedPort)
+    }
+
+    private fun startClient(open: () -> StreamConnection, kind: TransportKind, label: String) {
+        usingUsb = kind == TransportKind.USB
+        currentKind = kind
+        closeHandled = false
+        transportInfo = label
+        val generation = ++clientGeneration
         val newClient = MirageClient(
             buildHello(),
             stats,
             object : MirageClient.Listener {
                 override fun onConfig(newConfig: SessionConfig) {
                     mainHandler.post {
+                        if (generation != clientGeneration) return@post
                         autoReconnectEnabled = true
                         reconnectAttempts = 0
                         connecting = false
                         config = newConfig
                         videoWidth = newConfig.width
                         videoHeight = newConfig.height
+                        inputCaps = newConfig.inputCaps
+                        inputAllowed = inputCaps and 1 != 0
+                        inputReason = null
+                        keyboardBridge?.enabled = inputAllowed && inputCaps and 6 != 0
                         setKeepScreenOn(true)
                         val transport = if (usingUsb) "USB " else ""
                         status = "已连接 $transport${newConfig.width}x${newConfig.height}@${newConfig.fps}"
@@ -477,6 +760,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 override fun onVideo(frame: VideoFrame) {
+                    if (generation != clientGeneration) return
                     val currentDecoder = decoder
                     if (currentDecoder != null) {
                         currentDecoder.submit(frame)
@@ -486,10 +770,33 @@ class MainActivity : ComponentActivity() {
                 }
 
                 override fun onClosed(reason: String) {
+                    if (generation != clientGeneration) return
                     mainHandler.post { handleConnectionClosed(reason) }
                 }
+
+                override fun onUdpReady(ready: Boolean) {
+                    mainHandler.post {
+                        if (generation != clientGeneration) return@post
+                        if (usingUsb) return@post
+                        transportInfo = if (ready) "Wi-Fi UDP" else label
+                    }
+                }
+
+                override fun onInputState(enabled: Boolean, reason: String?) {
+                    mainHandler.post {
+                        if (generation != clientGeneration) return@post
+                        inputAllowed = enabled
+                        inputReason = reason
+                        keyboardBridge?.enabled = enabled && inputCaps and 6 != 0
+                        if (!enabled) {
+                            inputController.releaseAll()
+                            keyboardBridge?.hide()
+                        }
+                    }
+                }
             },
-            open
+            open,
+            serverHost = if (kind == TransportKind.WIFI && !isLoopbackHost(lastHost)) lastHost else null
         )
         client = newClient
         newClient.connect()
@@ -524,6 +831,11 @@ class MainActivity : ComponentActivity() {
     private fun handleConnectionClosed(reason: String) {
         if (closeHandled) return
         closeHandled = true
+        inputController.releaseAll()
+        keyboardBridge?.hide()
+        keyboardBridge?.enabled = false
+        inputAllowed = false
+        inputCaps = 0
         client = null
         connected = false
         val displayReason = friendlyReason(reason)
@@ -546,7 +858,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (usingUsb && findMirageAccessory() == null) {
+        if (usingUsb && findMirageAccessory() == null && transportMode == TransportMode.USB) {
             status = "USB 已断开，请重新插入 USB"
             connecting = true
             connected = false
@@ -760,18 +1072,116 @@ private fun DisconnectedScreen(
 private fun SettingsDialog(
     initialHost: String,
     initialPort: String,
+    initialFingerprint: String,
+    initialTransport: TransportMode,
+    onTransport: (TransportMode) -> Unit,
     onDismiss: () -> Unit,
-    onSave: (String, Int) -> Unit
+    onSave: (String, Int, String) -> Unit
 ) {
     var host by remember { mutableStateOf(initialHost) }
     var port by remember { mutableStateOf(initialPort) }
+    var fingerprintHex by remember { mutableStateOf(initialFingerprint) }
     var error by remember { mutableStateOf<String?>(null) }
+    var discovering by remember { mutableStateOf(false) }
+    var discoveryMessage by remember { mutableStateOf<String?>(null) }
+    var pasteLink by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    val discovery = remember { MdnsDiscovery(context) }
+
+    fun applyPayload(payload: PairingPayload) {
+        host = payload.host
+        port = payload.port.toString()
+        fingerprintHex = payload.fingerprintHex
+        discoveryMessage = "已配对「${payload.name}」"
+    }
+
+    val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val contents = result.contents
+        val payload = contents?.let(PairingPayload::parse)
+        if (payload == null) {
+            error = "二维码不是有效的 Mirage 配对码"
+        } else {
+            error = null
+            applyPayload(payload)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { discovery.stop() }
+    }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            discovery.stop()
+            onDismiss()
+        },
         title = { Text("连接设置") },
         text = {
             Column {
+                Text("连接方式", style = MaterialTheme.typography.labelLarge)
+                Row {
+                    listOf(
+                        TransportMode.AUTO to "自动",
+                        TransportMode.USB to "USB",
+                        TransportMode.WIFI to "Wi-Fi",
+                        TransportMode.TCP to "TCP"
+                    ).forEach { (mode, label) ->
+                        TextButton(onClick = { onTransport(mode) }) {
+                            Text(
+                                (if (mode == initialTransport) "✓ " else "") + label,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(onClick = {
+                        error = null
+                        scanner.launch(
+                            ScanOptions()
+                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                .setPrompt("扫描 Mac 上的 Mirage 配对二维码")
+                                .setBeepEnabled(false)
+                                .setOrientationLocked(true)
+                        )
+                    }) {
+                        Text("扫码配对")
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(
+                        onClick = {
+                            discovering = true
+                            discoveryMessage = "搜索局域网…"
+                            discovery.start(
+                                onFound = { foundHost, foundPort, attributes ->
+                                    host = foundHost
+                                    port = foundPort.toString()
+                                    discovering = false
+                                    discovery.stop()
+                                    val advertised = attributes["fp"]
+                                    if (!advertised.isNullOrBlank() && advertised == fingerprintHex) {
+                                        discoveryMessage = "已发现已配对 Mac，正在连接…"
+                                        onSave(foundHost, foundPort, fingerprintHex)
+                                    } else {
+                                        val name = attributes["name"] ?: foundHost
+                                        discoveryMessage = "发现「$name」，需扫码确认指纹"
+                                    }
+                                },
+                                onError = { message ->
+                                    discovering = false
+                                    discoveryMessage = message
+                                }
+                            )
+                        },
+                        enabled = !discovering
+                    ) {
+                        Text(if (discovering) "搜索中…" else "发现 Mac")
+                    }
+                    discoveryMessage?.let {
+                        Spacer(Modifier.width(8.dp))
+                        Text(it, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
                 OutlinedTextField(
                     value = host,
                     onValueChange = { host = it },
@@ -782,9 +1192,29 @@ private fun SettingsDialog(
                 OutlinedTextField(
                     value = port,
                     onValueChange = { port = it },
-                    label = { Text("端口") },
+                    label = { Text("端口（TLS 为 7778）") },
                     singleLine = true
                 )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = pasteLink,
+                    onValueChange = {
+                        pasteLink = it
+                        PairingPayload.parse(it)?.let { payload ->
+                            error = null
+                            applyPayload(payload)
+                        }
+                    },
+                    label = { Text("配对链接（扫码失败时粘贴）") },
+                    singleLine = true
+                )
+                if (fingerprintHex.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "指纹 ${fingerprintHex.take(8)}…",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
                 error?.let {
                     Spacer(Modifier.height(8.dp))
                     Text(it, color = MaterialTheme.colorScheme.error)
@@ -794,17 +1224,26 @@ private fun SettingsDialog(
         confirmButton = {
             TextButton(onClick = {
                 val parsedPort = port.toIntOrNull()
-                if (host.isBlank() || parsedPort == null || parsedPort <= 0) {
-                    error = "地址或端口无效"
-                } else {
-                    onSave(host.trim(), parsedPort)
+                when {
+                    host.isBlank() || parsedPort == null || parsedPort <= 0 ->
+                        error = "地址或端口无效"
+                    !isLoopbackHost(host) &&
+                        PairingPayload.decodeFingerprint(fingerprintHex) == null ->
+                        error = "Wi-Fi 连接需要配对指纹，请扫码或粘贴配对链接"
+                    else -> {
+                        discovery.stop()
+                        onSave(host.trim(), parsedPort, fingerprintHex)
+                    }
                 }
             }) {
                 Text("保存并连接")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = {
+                discovery.stop()
+                onDismiss()
+            }) {
                 Text("取消")
             }
         }
@@ -820,6 +1259,10 @@ private fun StreamingScreen(
     phoneHeight: Int,
     videoWidth: Int,
     videoHeight: Int,
+    transportInfo: String,
+    inputEnabled: Boolean,
+    inputReason: String?,
+    onInputFrame: (TouchFrame) -> Unit,
     onSurfaceReady: (AspectSurfaceView, Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit
 ) {
@@ -834,8 +1277,20 @@ private fun StreamingScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         VideoView(
             onSurfaceReady = onSurfaceReady,
-            onSurfaceDestroyed = onSurfaceDestroyed
+            onSurfaceDestroyed = onSurfaceDestroyed,
+            inputEnabled = inputEnabled,
+            onInputFrame = onInputFrame
         )
+        inputReason?.let {
+            Text(
+                it,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .padding(8.dp)
+            )
+        }
         if (showStats) {
             Column(
                 modifier = Modifier
@@ -865,8 +1320,21 @@ private fun StreamingScreen(
                         color = Color.White
                     )
                 }
+                if (transportInfo.isNotEmpty()) {
+                    Text("连接 $transportInfo", color = Color.White)
+                }
                 Text(status, color = Color.White)
             }
         }
     }
+}
+
+private fun isLoopbackHost(host: String?): Boolean =
+    host == "localhost" || host == "::1" || host?.startsWith("127.") == true
+
+private fun nextTransport(mode: TransportMode): TransportMode = when (mode) {
+    TransportMode.AUTO -> TransportMode.USB
+    TransportMode.USB -> TransportMode.WIFI
+    TransportMode.WIFI -> TransportMode.TCP
+    TransportMode.TCP -> TransportMode.AUTO
 }

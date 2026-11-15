@@ -30,6 +30,7 @@ public final class HelperApp: @unchecked Sendable {
     private let pointHeight: Int
     private let autoSize: Bool
     private let position: DisplayPosition
+    private let wifi: Bool
     private let dumpFramePath: String?
     private var dumpedFrame = false
     private let recordPath: String?
@@ -43,6 +44,7 @@ public final class HelperApp: @unchecked Sendable {
     private var encoder: VideoEncoder?
     private var capture: DisplayCapture?
     private var server: MirageServer?
+    private var injector: InputInjector?
 
     public init(
         displayID: CGDirectDisplayID,
@@ -56,6 +58,7 @@ public final class HelperApp: @unchecked Sendable {
         pointHeight: Int = 800,
         autoSize: Bool = false,
         position: DisplayPosition = .right,
+        wifi: Bool = false,
         dumpFramePath: String? = nil,
         recordPath: String? = nil
     ) {
@@ -70,6 +73,7 @@ public final class HelperApp: @unchecked Sendable {
         self.pointHeight = pointHeight
         self.autoSize = autoSize
         self.position = position
+        self.wifi = wifi
         self.dumpFramePath = dumpFramePath
         self.recordPath = recordPath
     }
@@ -106,7 +110,14 @@ public final class HelperApp: @unchecked Sendable {
             bitrate: UInt32(clamping: bitrate),
             rotation: 0
         )
-        let server = MirageServer(port: port, config: config)
+        let tls = wifi ? try TLSIdentity.loadOrCreate() : nil
+        let server = MirageServer(
+            port: port,
+            config: config,
+            bindAddress: wifi ? nil : .ipv4(.loopback),
+            serviceName: wifi ? "Mirage" : nil,
+            tlsIdentity: tls?.identity
+        )
         server.onKeyframeRequest = { [weak self] in
             self?.requestKeyframe()
         }
@@ -115,6 +126,31 @@ public final class HelperApp: @unchecked Sendable {
         }
         server.onLog = { message in
             print(message)
+            fflush(stdout)
+        }
+        let injector = InputInjector(displayID: targetDisplayID)
+        self.injector = injector
+        server.onInput = { event in
+            injector.inject(event)
+        }
+        server.inputAllowed = { _ in InputControl.accessibilityGranted }
+        server.inputPaused = { InputControl.isPaused }
+        let feedbackController = FeedbackController(initialBitrate: bitrate)
+        server.onFeedback = { [weak self] feedback in
+            guard let self else { return }
+            // A missing UDP fragment leaves the decoder predicting from a
+            // frame it never saw, so the picture stays corrupt until the next
+            // IDR; ask for one promptly instead of waiting for the periodic
+            // keyframe.
+            if feedback.lossPermille > 20,
+               self.keyframes.requestIfDue(nowMicros: monotonicMicros()) {
+                self.requestKeyframe()
+            }
+            guard let newBitrate = feedbackController.update(feedback, nowMicros: monotonicMicros()) else {
+                return
+            }
+            self.encoder?.setBitrate(newBitrate)
+            print("bitrate=\(newBitrate) reason=feedback loss=\(feedback.lossPermille) rtt=\(feedback.rttMS)")
             fflush(stdout)
         }
         self.server = server
@@ -143,11 +179,15 @@ public final class HelperApp: @unchecked Sendable {
 
         try await capture.start()
         try server.start()
-        print("listening=127.0.0.1:\(port)")
+        print("listening=\(wifi ? "0.0.0.0" : "127.0.0.1"):\(port)\(wifi ? " tls_port=\(server.tlsPort) mdns=_mirage._tcp" : "")")
+        if let tls {
+            print("tls_fingerprint=\(tls.fingerprint.prefix(4).map { String(format: "%02x", $0) }.joined())")
+        }
         fflush(stdout)
     }
 
     public func stop() async {
+        injector?.releaseAll()
         try? await capture?.stop()
         encoder?.finish()
         server?.stop()
@@ -242,6 +282,13 @@ public final class HelperApp: @unchecked Sendable {
     }
 
     private func relaunch(width: Int, height: Int) -> Never {
+        // execv keeps every open descriptor, so the inherited TCP/UDP sockets
+        // would make the new image fail to bind 7777/7778. Mark them
+        // close-on-exec first; the new image reopens what it needs.
+        let maxFD = getdtablesize()
+        for fd in 3..<maxFD {
+            _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+        }
         let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
         let arguments = CommandLine.arguments
         var cleaned = [executable]
