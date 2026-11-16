@@ -2,7 +2,6 @@ import {
   decodePing,
   decodeSessionConfig,
   decodeVideo,
-  encodeFrame,
   encodeHello,
   encodePing,
   Frame,
@@ -25,8 +24,21 @@ import { Stats } from './Stats';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Transport } from '../transport/Transport';
 import { TransportChoice } from '../transport/TransportSelector';
+import { InputGate } from './InputGate';
+import {
+  CtrlCode,
+  decodeCtrl,
+  encodeCtrl,
+  encodeKeyFrame,
+  encodePointerFrame,
+  encodeScrollFrame,
+  encodeTextFrame,
+  KeyInput,
+  PointerSample,
+  ScrollInput,
+  TextInput
+} from './InputProtocol';
 
-export const CTRL_REQUEST_KEYFRAME: number = 1;
 const PING_INTERVAL_MS = 1000;
 const LIVENESS_TIMEOUT_MS = 3000;
 const WATCHDOG_INTERVAL_MS = 500;
@@ -46,6 +58,9 @@ export class SessionListener {
 
   onClosed(reason: string): void {
   }
+
+  onInputGate(enabled: boolean, reason: string): void {
+  }
 }
 
 export class ClientSession {
@@ -55,6 +70,7 @@ export class ClientSession {
   private readonly stats: Stats;
   private readonly listener: SessionListener;
   private readonly model: SessionModel = new SessionModel();
+  private readonly gate: InputGate = new InputGate();
 
   private transport: Transport | null = null;
   private decoder: FrameDecoder = new FrameDecoder();
@@ -98,6 +114,7 @@ export class ClientSession {
 
   stop(): void {
     this.stopped = true;
+    this.releaseAll();
     this.clearTimers();
     this.dispatch(new SessionEvent(SessionEventKind.DISCONNECT), () => {
     });
@@ -105,7 +122,61 @@ export class ClientSession {
   }
 
   requestKeyframe(): void {
-    this.send(encodeFrame(MessageType.CTRL, new Uint8Array([CTRL_REQUEST_KEYFRAME])));
+    this.send(encodeCtrl(CtrlCode.REQUEST_KEYFRAME));
+  }
+
+  setInputEnabled(enabled: boolean): void {
+    this.gate.setLocalEnabled(enabled);
+    if (!enabled) {
+      this.releaseAll();
+    }
+  }
+
+  sendPointer(samples: PointerSample[]): void {
+    if (!this.gate.allow()) {
+      return;
+    }
+    try {
+      this.send(encodePointerFrame(samples));
+    } catch (err) {
+      hilog.warn(0x0200, 'MirageSession', 'pointer encode failed: %{public}s', (err as Error).message);
+    }
+  }
+
+  sendKey(key: KeyInput): void {
+    if (!this.gate.allow()) {
+      return;
+    }
+    this.send(encodeKeyFrame(key));
+  }
+
+  sendText(text: TextInput): void {
+    if (!this.gate.allow()) {
+      return;
+    }
+    try {
+      this.send(encodeTextFrame(text));
+    } catch (err) {
+      hilog.warn(0x0200, 'MirageSession', 'text encode failed: %{public}s', (err as Error).message);
+    }
+  }
+
+  sendScroll(scroll: ScrollInput): void {
+    if (!this.gate.allow()) {
+      return;
+    }
+    try {
+      this.send(encodeScrollFrame(scroll));
+    } catch (err) {
+      hilog.warn(0x0200, 'MirageSession', 'scroll encode failed: %{public}s', (err as Error).message);
+    }
+  }
+
+  releaseAll(): void {
+    if (!this.gate.allowRelease()) {
+      return;
+    }
+    this.send(encodeCtrl(CtrlCode.RELEASE_ALL));
   }
 
   private dispatch(event: SessionEvent, onOpen: () => void): void {
@@ -145,6 +216,7 @@ export class ClientSession {
         return;
       }
       this.connected = true;
+      this.gate.setConnected(true);
       this.lastInboundMs = Date.now();
       const frame = encodeHello(this.hello);
       return transport.write(frame);
@@ -180,9 +252,21 @@ export class ClientSession {
     if (frame.type === MessageType.SESSION_CONFIG) {
       const config = decodeSessionConfig(frame.payload);
       this.stats.setCodecLabel('HW');
+      this.gate.reset();
       this.dispatch(new SessionEvent(SessionEventKind.CONFIG), () => {
       });
       this.listener.onConfig(config);
+      this.listener.onInputGate(this.gate.getServerEnabled(), '');
+    } else if (frame.type === MessageType.CTRL) {
+      try {
+        const ctrl = decodeCtrl(frame.payload);
+        if (ctrl.code === CtrlCode.INPUT_ENABLED || ctrl.code === CtrlCode.INPUT_DISABLED) {
+          this.gate.applyCtrl(ctrl.code, ctrl.reason);
+          this.listener.onInputGate(this.gate.getServerEnabled(), ctrl.reason);
+        }
+      } catch (err) {
+        hilog.warn(0x0200, 'MirageSession', 'ctrl decode failed: %{public}s', (err as Error).message);
+      }
     } else if (frame.type === MessageType.VIDEO) {
       const video = decodeVideo(frame.payload);
       this.stats.onVideo(frame.payload.length);
@@ -290,6 +374,7 @@ export class ClientSession {
   private closeTransport(): void {
     this.clearTimers();
     this.connected = false;
+    this.gate.setConnected(false);
     const transport = this.transport;
     this.transport = null;
     if (transport !== null) {

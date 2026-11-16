@@ -20,6 +20,8 @@ export class Runtime {
   };
   static onClosed: (reason: string) => void = (reason: string) => {
   };
+  static onInputGate: (enabled: boolean, reason: string) => void = (enabled: boolean, reason: string) => {
+  };
 
   static reset(): void {
     Runtime.session = null;
@@ -36,6 +38,8 @@ export class Runtime {
     Runtime.onState = (state: SessionState) => {
     };
     Runtime.onClosed = (reason: string) => {
+    };
+    Runtime.onInputGate = (enabled: boolean, reason: string) => {
     };
   }
 }

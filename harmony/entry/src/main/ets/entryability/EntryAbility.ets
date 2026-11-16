@@ -18,6 +18,14 @@ export default class EntryAbility extends UIAbility {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
+    windowStage.getMainWindow().then((win: window.Window) => {
+      win.setWindowSystemBarEnable(['navigation']).catch((err: Error) => {
+        hilog.warn(DOMAIN, 'testTag', 'hide status bar failed: %{public}s', err.message);
+      });
+    }).catch((err: Error) => {
+      hilog.warn(DOMAIN, 'testTag', 'get main window failed: %{public}s', err.message);
+    });
+
     windowStage.loadContent('pages/ConnectPage', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));

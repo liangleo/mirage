@@ -22,13 +22,15 @@ class UiListener extends SessionListener {
   private stateCb: (model: SessionModel) => void;
   private configCb: (config: SessionConfig) => void;
   private closedCb: (reason: string) => void;
+  private gateCb: (enabled: boolean, reason: string) => void;
 
   constructor(stateCb: (model: SessionModel) => void, configCb: (config: SessionConfig) => void,
-    closedCb: (reason: string) => void) {
+    closedCb: (reason: string) => void, gateCb: (enabled: boolean, reason: string) => void) {
     super();
     this.stateCb = stateCb;
     this.configCb = configCb;
     this.closedCb = closedCb;
+    this.gateCb = gateCb;
   }
 
   onState(model: SessionModel): void {
@@ -45,6 +47,10 @@ class UiListener extends SessionListener {
 
   onClosed(reason: string): void {
     this.closedCb(reason);
+  }
+
+  onInputGate(enabled: boolean, reason: string): void {
+    this.gateCb(enabled, reason);
   }
 }
 
@@ -107,6 +113,7 @@ struct ConnectPage {
       hilog.warn(DOMAIN, TAG, 'display query failed: %{public}s', (err as Error).message);
     }
     this.hello.name = 'HarmonyOS';
+    this.hello.features = 0x70;
     if (Runtime.session !== null) {
       this.status = this.describe(Runtime.state);
     }
@@ -273,6 +280,9 @@ struct ConnectPage {
       },
       (reason: string) => {
         this.handleClosed(reason);
+      },
+      (enabled: boolean, reason: string) => {
+        Runtime.onInputGate(enabled, reason);
       }));
     Runtime.session = session;
 
