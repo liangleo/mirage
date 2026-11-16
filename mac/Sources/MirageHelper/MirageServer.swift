@@ -56,6 +56,7 @@ public final class MirageServer: @unchecked Sendable {
     private var lastFeedbackMicros: UInt64 = 0
     private var clientDeviceID: Data?
     private var inputDisabledSent = false
+    private var inputEventLogged = false
     private var connectionSecure = false
     private var inputRate = InputRateLimiter()
     private var inputWasPaused = false
@@ -338,6 +339,7 @@ public final class MirageServer: @unchecked Sendable {
             clientDeviceID = hello.deviceID
             session.inputCaps = advertisedInputCaps
             inputDisabledSent = false
+            inputEventLogged = false
             onLog?("hello screen=\(hello.screenWidth)x\(hello.screenHeight) caps=\(session.inputCaps)")
             onHello?(hello)
         }
@@ -394,6 +396,10 @@ public final class MirageServer: @unchecked Sendable {
             return
         }
         guard allowInputRate() else { return }
+        if !inputEventLogged {
+            inputEventLogged = true
+            onLog?("input events flowing")
+        }
         onInput?(event)
     }
 

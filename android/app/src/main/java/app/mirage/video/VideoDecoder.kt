@@ -39,6 +39,7 @@ class VideoDecoder(
     private var waitingForKeyframe = false
 
     private var codec: MediaCodec? = null
+    private var codecName = "-"
     private var initFailures = 0
     private var outputs = 0
 
@@ -94,7 +95,10 @@ class VideoDecoder(
         try {
             configureDecoder(firstKeyframe.annexB)
         } catch (error: Exception) {
-            onError("decoder init failed: ${error.message}")
+            onError(
+                "decoder init failed: ${codecName} surface=${surface.isValid} " +
+                    "${error.javaClass.simpleName}: ${error.message ?: "no message"}"
+            )
             queue.clear()
             onNeedKeyframe()
             if (initFailures < MAX_INIT_FAILURES) {
@@ -180,39 +184,57 @@ class VideoDecoder(
         val (sps, pps) = AnnexB.parameterSets(firstKeyframe)
         Log.i("Mirage", "configure ${config.width}x${config.height} sps=${sps?.size ?: -1} pps=${pps?.size ?: -1}")
 
-        try {
-            startDecoder(buildFormat(sps, pps))
-        } catch (firstError: Exception) {
-            Log.w("Mirage", "configure with csd failed: ${firstError.message}; retrying in-band")
-            startDecoder(buildFormat(null, null))
+        // Some vendor decoders (notably Android-compat runtimes) reject the
+        // optional tuning keys or the CSD buffers, so walk down to a bare
+        // format before giving up.
+        val attempts = listOf(
+            "csd" to buildFormat(sps, pps, minimal = false),
+            "in-band" to buildFormat(null, null, minimal = false),
+            "minimal" to buildFormat(sps, pps, minimal = true)
+        )
+        var lastError: Exception? = null
+        for ((label, format) in attempts) {
+            try {
+                startDecoder(format)
+                return
+            } catch (error: Exception) {
+                lastError = error
+                Log.w(
+                    "Mirage",
+                    "configure $label failed: ${error.javaClass.simpleName}: ${error.message}"
+                )
+            }
         }
+        throw lastError ?: IllegalStateException("no decoder attempt")
     }
 
-    private fun buildFormat(sps: ByteArray?, pps: ByteArray?): MediaFormat {
+    private fun buildFormat(sps: ByteArray?, pps: ByteArray?, minimal: Boolean = false): MediaFormat {
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_AVC,
             config.width,
             config.height
         )
-        if (Build.VERSION.SDK_INT >= 30) {
+        if (!minimal && Build.VERSION.SDK_INT >= 30) {
             try {
                 format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             } catch (_: Exception) {
             }
         }
-        if (Build.VERSION.SDK_INT >= 28) {
+        if (!minimal && Build.VERSION.SDK_INT >= 28) {
             try {
                 format.setInteger(MediaFormat.KEY_PRIORITY, 0)
             } catch (_: Exception) {
             }
+            try {
+                format.setInteger(MediaFormat.KEY_OPERATING_RATE, config.fps)
+            } catch (_: Exception) {
+            }
         }
-        try {
-            format.setInteger(MediaFormat.KEY_OPERATING_RATE, config.fps)
-        } catch (_: Exception) {
-        }
-        try {
-            format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024)
-        } catch (_: Exception) {
+        if (!minimal) {
+            try {
+                format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024)
+            } catch (_: Exception) {
+            }
         }
 
         if (sps != null) format.setByteBuffer("csd-0", ByteBuffer.wrap(sps))
@@ -245,10 +267,15 @@ class VideoDecoder(
     }
 
     private fun createDecoder(): MediaCodec {
-        val candidates = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { info ->
-            !info.isEncoder && info.supportedTypes.any {
-                it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true)
+        val candidates = try {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { info ->
+                !info.isEncoder && info.supportedTypes.any {
+                    it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true)
+                }
             }
+        } catch (error: Exception) {
+            Log.w("Mirage", "codec list failed: ${error.javaClass.simpleName}: ${error.message}")
+            emptyList()
         }
         val preferred = if (Build.VERSION.SDK_INT >= 29) {
             candidates.firstOrNull { it.isHardwareAccelerated } ?: candidates.firstOrNull()
@@ -257,8 +284,11 @@ class VideoDecoder(
         }
 
         if (preferred == null) {
+            codecName = "by-type"
+            Log.i("Mirage", "decoder=by-type (no H.264 codec in list)")
             return MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         }
+        codecName = preferred.name
 
         val hardware = Build.VERSION.SDK_INT >= 29 && preferred.isHardwareAccelerated
         Log.i("Mirage", "decoder=${preferred.name} hardware=$hardware")

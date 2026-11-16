@@ -222,6 +222,7 @@ class MainActivity : ComponentActivity() {
     private var inputCaps by mutableStateOf(0)
     private var inputAllowed by mutableStateOf(false)
     private var inputUserEnabled by mutableStateOf(true)
+    private var touchFrames by mutableStateOf(0)
     private var inputReason by mutableStateOf<String?>(null)
     private var keyboardVisible by mutableStateOf(false)
     private val inputSender = java.util.concurrent.Executors.newSingleThreadExecutor()
@@ -287,7 +288,11 @@ class MainActivity : ComponentActivity() {
                                 transportInfo = transportInfo,
                                 inputEnabled = connected && inputAllowed && inputUserEnabled && !controlsVisible,
                                 inputReason = inputReason,
-                                onInputFrame = { inputController.onFrame(it) },
+                                touchFrames = touchFrames,
+                                onInputFrame = {
+                                    touchFrames++
+                                    inputController.onFrame(it)
+                                },
                                 onSurfaceReady = { view, newSurface ->
                                     surfaceView = view
                                     surface = newSurface
@@ -1262,6 +1267,7 @@ private fun StreamingScreen(
     transportInfo: String,
     inputEnabled: Boolean,
     inputReason: String?,
+    touchFrames: Int,
     onInputFrame: (TouchFrame) -> Unit,
     onSurfaceReady: (AspectSurfaceView, Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit
@@ -1323,6 +1329,10 @@ private fun StreamingScreen(
                 if (transportInfo.isNotEmpty()) {
                     Text("连接 $transportInfo", color = Color.White)
                 }
+                Text(
+                    "输入 ${if (inputEnabled) "开" else "关"} · 触摸 $touchFrames",
+                    color = Color.White
+                )
                 Text(status, color = Color.White)
             }
         }

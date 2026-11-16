@@ -9,3 +9,9 @@ android/local.properties
 android/app/build/
 *.xcuserstate
 .superpowers/
+.claude/
+.mcp.json
+.vscode/
+skills-lock.json
+.hvigor/
+.codegenie/

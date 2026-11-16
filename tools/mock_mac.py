@@ -4,8 +4,10 @@
 Useful for developing the Android app without the real Mac helper.
 """
 import argparse
+import hashlib
 import os
 import socket
+import ssl
 import struct
 import time
 
@@ -67,6 +69,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True)
     parser.add_argument("--port", type=int, default=7777)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--tls-cert", default=None)
+    parser.add_argument("--tls-key", default=None)
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=800)
@@ -81,12 +86,29 @@ def main() -> int:
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", args.port))
+    listener.bind((args.host, args.port))
     listener.listen(1)
-    print(f"listening=127.0.0.1:{args.port} frames={len(frames)} fps={args.fps}", flush=True)
+
+    context = None
+    if args.tls_cert:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(args.tls_cert, args.tls_key)
+        with open(args.tls_cert, "rb") as handle:
+            pem = handle.read()
+        der = ssl.PEM_cert_to_DER_cert(pem.decode())
+        print("tls fingerprint=" + hashlib.sha256(der).hexdigest(), flush=True)
+    print(f"listening={args.host}:{args.port} frames={len(frames)} fps={args.fps}", flush=True)
 
     while True:
         connection, _ = listener.accept()
+        if context is not None:
+            try:
+                connection = context.wrap_socket(connection, server_side=True)
+            except (ssl.SSLError, OSError) as error:
+                print("tls handshake failed:", error, flush=True)
+                connection.close()
+                continue
+            print("tls handshake ok", flush=True)
         connection.settimeout(0.01)
         print("client connected", flush=True)
         try:
@@ -124,6 +146,7 @@ def run_session(connection: socket.socket, frames, args) -> None:
             buffer = buffer[4 + length:]
             if frame_type == 1:
                 hello_seen = True
+                print("hello received", flush=True)
             elif frame_type == 7 and len(payload) == 8:
                 connection.sendall(frame_bytes(7, payload))
             elif frame_type == 8:
@@ -135,6 +158,7 @@ def run_session(connection: socket.socket, frames, args) -> None:
 
         if not sent_config:
             connection.sendall(session_config(args.width, args.height, args.fps, args.bitrate))
+            print("config sent", flush=True)
             sent_config = True
             next_send = time.monotonic()
 
