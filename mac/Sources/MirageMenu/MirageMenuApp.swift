@@ -701,23 +701,23 @@ final class HelperController: ObservableObject {
     }
 
     func setUsbBridge(_ enabled: Bool) {
+        guard enabled != usbEnabled else { return }
+        let wasWifi = wifiEnabled
+        let action = HelperLifecycle.actionOnUsbChange(
+            enabled: enabled,
+            wasWifi: wasWifi,
+            running: isRunning
+        )
+        usbEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "usbEnabled")
         if enabled {
-            let wasWifi = wifiEnabled
-            usbEnabled = true
             wifiEnabled = false
-            UserDefaults.standard.set(true, forKey: "usbEnabled")
             UserDefaults.standard.set(false, forKey: "wifiEnabled")
-            if isRunning {
-                if wasWifi {
-                    restart()
-                }
-            } else {
-                start()
-            }
+        }
+        apply(action)
+        if enabled {
             startUsbBridge()
         } else {
-            usbEnabled = false
-            UserDefaults.standard.set(false, forKey: "usbEnabled")
             stopUsbBridge()
             status = "USB 连接已关闭 · 如手机仍在 accessory 模式请拔插 USB"
         }
@@ -725,22 +725,35 @@ final class HelperController: ObservableObject {
 
     func setWifiEnabled(_ enabled: Bool) {
         guard enabled != wifiEnabled else { return }
+        let wasUsb = usbEnabled
+        let action = HelperLifecycle.actionOnWifiChange(
+            enabled: enabled,
+            usbEnabled: usbEnabled,
+            running: isRunning
+        )
         wifiEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "wifiEnabled")
-        if enabled {
-            let wasUsb = usbEnabled
+        if enabled && wasUsb {
             usbEnabled = false
             UserDefaults.standard.set(false, forKey: "usbEnabled")
-            if wasUsb {
-                stopUsbBridge()
-            }
-            if isRunning {
-                restart()
-            } else {
-                start()
-            }
-        } else if isRunning {
+            stopUsbBridge()
+        }
+        apply(action)
+        if action == .stop {
+            status = "已停止 · Wi-Fi 连接已关闭"
+        }
+    }
+
+    private func apply(_ action: HelperAction) {
+        switch action {
+        case .none:
+            break
+        case .start:
+            start()
+        case .restart:
             restart()
+        case .stop:
+            shutdown()
         }
     }
 
@@ -922,28 +935,39 @@ final class HelperController: ObservableObject {
 
     private func stopHelperOnly() {
         if let child = process {
-            kill(child.processIdentifier, SIGKILL)
+            terminate(child.processIdentifier)
         }
         if let pid = externalHelperPID {
-            kill(pid, SIGKILL)
+            terminate(pid)
         }
         process = nil
         externalHelperPID = nil
         isRunning = false
     }
 
+    /// SIGTERM lets the helper stop its capture stream and destroy the virtual
+    /// display; SIGKILL would leave the screen-recording indicator lit.
+    private func terminate(_ pid: pid_t) {
+        kill(pid, SIGTERM)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+            if kill(pid, 0) == 0 {
+                kill(pid, SIGKILL)
+            }
+        }
+    }
+
     private func restart() {
         if usbEnabled {
             stopHelperOnly()
             status = "重启服务…"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 self?.start()
             }
         } else {
             stopHelperOnly()
             stopUsbBridge()
             status = "重启服务…"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 self?.start()
             }
         }

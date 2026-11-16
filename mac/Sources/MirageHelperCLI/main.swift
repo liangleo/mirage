@@ -164,6 +164,15 @@ if arguments.contains("--list-displays") {
         print("helper_error=\(error)")
         exit(1)
     }
+    let shutdown = ShutdownSignal()
+    shutdown.install {
+        Task {
+            await app.stop()
+            print("helper_stopped=signal")
+            fflush(stdout)
+            exit(0)
+        }
+    }
     RunLoop.current.run()
 }
 
