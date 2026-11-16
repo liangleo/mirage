@@ -104,7 +104,7 @@ App 启动时默认是**副屏模式**，且默认不会自动启动服务；可
 2. 在 Mac 主界面打开「USB 免调试连接（AOA）」，或 `open build/.Mirage.app --args --usb`。
 3. 手机首次会弹出 USB 授权，勾选「连接后一律打开 Mirage」并确定；之后插入 USB 会自动打开 App。
 4. 手机状态栏/调试浮层显示「已连接 USB」即表示走的是 accessory 通道；此时不需要 `adb reverse`。
-5. 需要开机/登录后自动可用：再打开「登录时自动启动 Mirage」。USB 开关会持久化，App 启动后自动拉起 helper 并循环等待设备。登录项建议先把 App 安装到 `/Applications`（`make install-mac`）再开启。
+5. 需要开机/登录后自动可用：再打开「登录时自动启动 Mirage」。USB 开关会持久化，App 启动后自动拉起 helper 并循环等待设备。登录项建议先把 App 安装到 `/Applications`（`make install.mac`）再开启。
 
 ### Wi-Fi 局域网连接
 

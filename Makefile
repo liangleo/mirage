@@ -25,7 +25,7 @@ HDC_T := $(if $(HDC_DEVICE),-t $(HDC_DEVICE),)
 HAP := $(HARMONY)/entry/build/default/outputs/default/entry-default-signed.hap
 TEST_HAP := $(HARMONY)/entry/build/default/outputs/ohosTest/entry-ohosTest-signed.hap
 
-.PHONY: help init build build-mac build-android build-aoa build-harmony app test test-harmony clean install install-mac install-apk install-hap connect connect-harmony run dev logs
+.PHONY: help init build build.mac build.android build.aoa build.harmony app test test.harmony clean install install.mac install.apk install.hap connect.android connect.harmony run dev logs
 
 help:
 	@echo "Mirage 常用命令:"
@@ -34,8 +34,8 @@ help:
 	@echo "  make app           打包 build/Mirage.app"
 	@echo "  make test          运行 Mac、Android 与鸿蒙单元测试"
 	@echo "  make install       安装 App 到 $(INSTALL_DIR)，并安装 APK/HAP 到设备"
-	@echo "  make connect       adb 连接 Android 设备并设置端口反向转发"
-	@echo "  make connect-harmony  hdc 设置端口反向转发（TCP 模式）"
+	@echo "  make connect.android  adb 连接 Android 设备并设置端口反向转发"
+	@echo "  make connect.harmony  hdc 设置端口反向转发（TCP 模式）"
 	@echo "  make run           打开已打包的 Mirage.app"
 	@echo "  make dev           直接从源码运行菜单栏 App"
 	@echo "  make logs          跟踪 helper 日志"
@@ -63,12 +63,12 @@ init:
 	@cd $(MAC) && swift build
 	@echo "初始化完成"
 
-build: build-mac build-android build-aoa build-harmony
+build: build.mac build.android build.aoa build.harmony
 
-build-mac:
+build.mac:
 	cd $(MAC) && swift build
 
-build-aoa:
+build.aoa:
 	@LIBUSB="$$(brew --prefix libusb 2>/dev/null)"; \
 	if [ -z "$$LIBUSB" ]; then echo "缺少 libusb：brew install libusb"; exit 1; fi; \
 	mkdir -p $(ROOT)/build; \
@@ -77,10 +77,10 @@ build-aoa:
 		-framework IOKit -framework CoreFoundation -framework Security -pthread \
 		-o $(ROOT)/build/aoa_bridge
 
-build-android:
+build.android:
 	cd $(ANDROID) && JAVA_HOME="$(GRADLE_JAVA_HOME)" ./gradlew :app:assembleDebug
 
-build-harmony:
+build.harmony:
 	@test -x "$(HVIGORW)" || { echo "未找到 hvigorw：设置 DEVECO_HOME 指向 DevEco Studio 安装目录"; exit 1; }
 	cd $(HARMONY) && $(HARMONY_ENV) $(HVIGORW) assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
 
@@ -90,9 +90,9 @@ app:
 test:
 	cd $(MAC) && swift test
 	cd $(ANDROID) && JAVA_HOME="$(GRADLE_JAVA_HOME)" ./gradlew :app:testDebugUnitTest
-	$(MAKE) test-harmony
+	$(MAKE) test.harmony
 
-test-harmony:
+test.harmony:
 	@test -x "$(HVIGORW)" || { echo "未找到 hvigorw：设置 DEVECO_HOME 指向 DevEco Studio 安装目录"; exit 1; }
 	cd $(HARMONY) && $(HARMONY_ENV) $(HVIGORW) assembleHap --mode module -p product=default -p buildMode=debug -p module=entry@ohosTest --no-daemon
 	@if [ -z "$(HDC_DEVICE)" ]; then echo "没有已连接鸿蒙设备，跳过单测运行"; exit 0; fi
@@ -106,23 +106,23 @@ clean:
 	rm -rf $(ROOT)/build $(ANDROID)/app/build $(ANDROID)/.gradle $(ANDROID)/.kotlin
 	rm -rf $(HARMONY)/entry/build $(HARMONY)/.hvigor
 
-install: install-mac install-apk install-hap
+install: install.mac install.apk install.hap
 
-install-mac: app
+install.mac: app
 	rm -rf "$(INSTALL_DIR)/Mirage.app"
 	ditto "$(APP)" "$(INSTALL_DIR)/Mirage.app"
 	@echo "已安装到 $(INSTALL_DIR)/Mirage.app"
 
-install-apk: build-android
+install.apk: build.android
 	@DEV="$(DEVICE)"; \
 	if [ -z "$$DEV" ]; then echo "没有已连接设备，跳过 APK 安装"; exit 0; fi; \
 	$(ADB) -s $$DEV install -r $(ANDROID)/app/build/outputs/apk/debug/app-debug.apk
 
-install-hap: build-harmony
+install.hap: build.harmony
 	@if [ -z "$(HDC_DEVICE)" ]; then echo "没有已连接鸿蒙设备，跳过 HAP 安装"; exit 0; fi
 	$(HDC) $(HDC_T) install -r $(HAP)
 
-connect:
+connect.android:
 	@DEV="$(DEVICE)"; \
 	if [ -z "$$DEV" ]; then DEV=$$($(ADB) devices | awk 'NR>1 && $$2=="device" {print $$1; exit}'); fi; \
 	if [ -z "$$DEV" ]; then \
@@ -131,7 +131,7 @@ connect:
 	fi; \
 	$(ADB) -s $$DEV reverse tcp:7777 tcp:7777 && echo "adb reverse 已设置 ($$DEV)"
 
-connect-harmony:
+connect.harmony:
 	@if [ -z "$(HDC_DEVICE)" ]; then \
 		echo "hdc 未发现设备（模拟器先启动，或确认已 USB 调试授权）"; \
 		exit 1; \
