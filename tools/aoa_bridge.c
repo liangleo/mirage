@@ -9,9 +9,11 @@
  *      -L/opt/homebrew/opt/libusb/lib -lusb-1.0 -pthread -o build/aoa_bridge
  */
 #include <arpa/inet.h>
+#include <errno.h>
 #include <libusb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -180,9 +182,10 @@ static int find_endpoints(libusb_device *device, unsigned char *in, unsigned cha
 }
 
 static void send_bye_to_resync(void) {
-    /* [u32 length=0][u8 BYE=8] forces an already-open Android client to
-     * reconnect and send a fresh HELLO. */
-    unsigned char bye[5] = {0, 0, 0, 0, 8};
+    /* [u32 length=1][u8 BYE=8] forces an already-open Android client to
+     * reconnect and send a fresh HELLO. The length counts the type byte, so a
+     * zero here is a malformed frame and the client drops the session. */
+    unsigned char bye[5] = {0, 0, 0, 1, 8};
     int transferred = 0;
     libusb_bulk_transfer(
         usb_handle, endpoint_out, bye, sizeof(bye), &transferred, 1000
@@ -191,9 +194,26 @@ static void send_bye_to_resync(void) {
     fflush(stdout);
 }
 
+/* BSD signal() restarts interrupted syscalls, so a bare blocking send/recv
+ * ignores SIGTERM and leaves an orphan holding the device in accessory mode.
+ * Every socket wait polls with a timeout and re-checks stopping. */
+static int wait_fd(int fd, short events) {
+    for (;;) {
+        if (stopping) return -1;
+        struct pollfd pfd = {fd, events, 0};
+        int ready = poll(&pfd, 1, 200);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (ready > 0 && (pfd.revents & (events | POLLHUP | POLLERR))) return 0;
+    }
+}
+
 static int write_all(int fd, const unsigned char *data, size_t length) {
     size_t offset = 0;
     while (offset < length && !stopping) {
+        if (wait_fd(fd, POLLOUT) != 0) return -1;
         ssize_t written = send(fd, data + offset, length - offset, MSG_NOSIGNAL);
         if (written <= 0) return -1;
         offset += (size_t)written;
@@ -209,8 +229,10 @@ static void *usb_to_tcp(void *unused) {
         int rc = libusb_bulk_transfer(
             usb_handle, endpoint_in, buffer, sizeof(buffer), &transferred, 1000
         );
-        if (rc == LIBUSB_ERROR_TIMEOUT) continue;
-        if (rc != 0 || transferred <= 0) {
+        // Same as the OUT path: bytes moved before the timeout still count, or
+        // the helper's frame parser loses them and desyncs.
+        if (rc == LIBUSB_ERROR_TIMEOUT && transferred <= 0) continue;
+        if (rc != 0 && transferred <= 0) {
             fprintf(stderr, "usb read stopped rc=%d transferred=%d\n", rc, transferred);
             break;
         }
@@ -253,6 +275,10 @@ static void *tcp_to_usb(void *unused) {
     (void)unused;
     unsigned char buffer[USB_BUFFER];
     int fd = tcp_fd;
+    /* The client can close the accessory while the cable stays attached; the
+     * device then stops draining OUT and every transfer times out forever.
+     * Exit so the supervisor re-does the AOA handshake for a fresh session. */
+    int out_timeouts = 0;
 
     while (!stopping) {
         if (fd < 0) {
@@ -270,7 +296,12 @@ static void *tcp_to_usb(void *unused) {
             fflush(stdout);
         }
 
-        ssize_t read_count = recv(fd, buffer, sizeof(buffer), 0);
+        ssize_t read_count;
+        if (wait_fd(fd, POLLIN) != 0) {
+            stopping = 1;
+            break;
+        }
+        read_count = recv(fd, buffer, sizeof(buffer), 0);
         if (read_count <= 0) {
             fprintf(stderr, "tcp read stopped count=%zd; reconnecting\n", read_count);
             int old_fd = fd;
@@ -289,13 +320,35 @@ static void *tcp_to_usb(void *unused) {
                 usb_handle, endpoint_out, buffer + offset,
                 (int)((size_t)read_count - offset), &transferred, 1000
             );
-            if (rc == LIBUSB_ERROR_TIMEOUT) continue;
+            /* A timed-out transfer that still moved bytes is progress. Treating
+             * it as a stall re-sent the same bytes from `offset` on the next
+             * attempt, which duplicated them into the stream and desynced the
+             * client's frame parser. */
+            if (transferred > 0) {
+                offset += (size_t)transferred;
+                out_timeouts = 0;
+                if (rc == LIBUSB_ERROR_TIMEOUT) continue;
+            }
+            if (rc == LIBUSB_ERROR_TIMEOUT) {
+                if (++out_timeouts >= 3) {
+                    fprintf(stderr, "accessory not draining; restarting AOA"
+                        " (chunk=%zd off=%zu first=%02x%02x%02x%02x type=%02x)\n",
+                        read_count, offset, read_count > 4 ? buffer[0] : 0,
+                        read_count > 4 ? buffer[1] : 0, read_count > 4 ? buffer[2] : 0,
+                        read_count > 4 ? buffer[3] : 0, read_count > 4 ? buffer[4] : 0);
+                    fflush(stderr);
+                    stopping = 1;
+                    graceful_stop = 1;
+                    break;
+                }
+                continue;
+            }
+            out_timeouts = 0;
             if (rc != 0 || transferred <= 0) {
                 fprintf(stderr, "usb write stopped rc=%d transferred=%d\n", rc, transferred);
                 stopping = 1;
                 break;
             }
-            offset += (size_t)transferred;
         }
     }
 

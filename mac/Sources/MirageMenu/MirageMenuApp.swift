@@ -56,11 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let mode = HelperController.Mode(rawValue: arguments[index + 1]) {
             HelperController.shared.setMode(mode)
             HelperController.shared.start()
-        } else if HelperController.shared.autoStartOnLaunch || HelperController.shared.wifiEnabled {
+        } else if HelperController.shared.autoStartOnLaunch {
             HelperController.shared.start()
         }
 
-        if arguments.contains("--usb") || HelperController.shared.usbEnabled {
+        if arguments.contains("--usb") {
             HelperController.shared.setUsbBridge(true)
         }
 
@@ -505,6 +505,8 @@ final class HelperController: ObservableObject {
     private var process: Process?
     private var externalHelperPID: pid_t?
     private var bridgeProcess: Process?
+    private var bridgeStartedAt: Date?
+    private var bridgeRestarts = 0
     private var monitorTimer: Timer?
     private var instanceLockFD: Int32 = -1
     private lazy var tlsIdentity = try? TLSIdentity.loadOrCreate()
@@ -533,12 +535,10 @@ final class HelperController: ObservableObject {
         let savedFPS = UserDefaults.standard.integer(forKey: "fps")
         fps = Self.frameRates.contains(savedFPS) ? savedFPS : 60
         autoStartOnLaunch = UserDefaults.standard.bool(forKey: "autoStartOnLaunch")
-        let storedUsb = UserDefaults.standard.bool(forKey: "usbEnabled")
-        usbEnabled = storedUsb
-        wifiEnabled = storedUsb ? false : UserDefaults.standard.bool(forKey: "wifiEnabled")
-        if storedUsb {
-            UserDefaults.standard.set(false, forKey: "wifiEnabled")
-        }
+        // 服务不随 App 启动自动开启：之前的选择只影响本次运行，重启后一律显示"关闭"，
+        // 否则菜单上的"停止 USB 连接"会让人以为服务已经在跑。
+        usbEnabled = false
+        wifiEnabled = false
         launchAtLogin = SMAppService.mainApp.status == .enabled
 
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
@@ -709,10 +709,8 @@ final class HelperController: ObservableObject {
             running: isRunning
         )
         usbEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "usbEnabled")
         if enabled {
             wifiEnabled = false
-            UserDefaults.standard.set(false, forKey: "wifiEnabled")
         }
         apply(action)
         if enabled {
@@ -732,10 +730,8 @@ final class HelperController: ObservableObject {
             running: isRunning
         )
         wifiEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "wifiEnabled")
         if enabled && wasUsb {
             usbEnabled = false
-            UserDefaults.standard.set(false, forKey: "usbEnabled")
             stopUsbBridge()
         }
         apply(action)
@@ -802,9 +798,16 @@ final class HelperController: ObservableObject {
                 guard let self, self.bridgeProcess === ended else { return }
                 self.bridgeProcess = nil
                 self.usbBridgeRunning = false
+                // A bridge that died right after starting is a failing handshake:
+                // restarting it every 0.5s made the tablet pop its USB permission
+                // dialog over and over. Back off instead.
+                let lived = self.bridgeStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+                self.bridgeStartedAt = nil
+                self.bridgeRestarts = lived > 20 ? 1 : self.bridgeRestarts + 1
+                let delay = min(5.0, 0.5 * Double(self.bridgeRestarts))
                 if self.usbEnabled && self.isRunning {
                     self.status = "USB 已启用，等待设备…"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                         guard let self, self.usbEnabled, self.isRunning,
                               self.bridgeProcess == nil else { return }
                         self.startUsbBridge()
@@ -822,20 +825,35 @@ final class HelperController: ObservableObject {
             return
         }
         bridgeProcess = child
+        bridgeStartedAt = Date()
         usbBridgeRunning = true
     }
 
-    private func stopUsbBridge() {
+    private func stopUsbBridge(blocking: Bool = false) {
         if let child = bridgeProcess {
             let pid = child.processIdentifier
             kill(pid, SIGTERM)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            if blocking {
+                // 退出时异步兜底不会执行（App 已经没了），必须同步等到桥退出，
+                // 否则它继续占着设备，下次启动就会出现两个 mirage-aoa。
+                let deadline = Date().addingTimeInterval(1.5)
+                while child.isRunning && Date() < deadline {
+                    usleep(50_000)
+                }
                 if child.isRunning {
                     kill(pid, SIGKILL)
+                }
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    if child.isRunning {
+                        kill(pid, SIGKILL)
+                    }
                 }
             }
         }
         bridgeProcess = nil
+        bridgeStartedAt = nil
+        bridgeRestarts = 0
         usbBridgeRunning = false
     }
 
@@ -921,14 +939,13 @@ final class HelperController: ObservableObject {
 
     func stop() {
         usbEnabled = false
-        UserDefaults.standard.set(false, forKey: "usbEnabled")
         stopUsbBridge()
         stopHelperOnly()
         status = "已停止 · USB 连接已关闭"
     }
 
     func shutdown() {
-        stopUsbBridge()
+        stopUsbBridge(blocking: true)
         stopHelperOnly()
         status = "已停止"
     }
