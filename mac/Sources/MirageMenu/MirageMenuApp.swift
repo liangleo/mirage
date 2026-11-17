@@ -910,9 +910,14 @@ final class HelperController: ObservableObject {
                 guard let self, self.process === ended else { return }
                 self.process = nil
                 self.isRunning = false
-                self.status = ended.terminationStatus == 0
-                    ? "已停止"
-                    : "已停止（退出码 \(ended.terminationStatus)）· 查看日志"
+                // 4 = mirage-helper 没有屏幕录制权限（见 HelperAppCLI main.swift）
+                if ended.terminationStatus == 4 {
+                    self.status = "需要屏幕录制权限：系统设置 → 隐私与安全性 → 屏幕录制，勾选 mirage-helper 后重启服务"
+                } else {
+                    self.status = ended.terminationStatus == 0
+                        ? "已停止"
+                        : "已停止（退出码 \(ended.terminationStatus)）· 查看日志"
+                }
             }
         }
 

@@ -118,6 +118,16 @@ if arguments.contains("--list-displays") {
     Thread.sleep(forTimeInterval: seconds)
     server.stop()
 } else {
+    // The screen-recording prompt comes from the first SCShareableContent call,
+    // i.e. from every new helper process — while the grant was missing that
+    // looked like a prompt storm. Ask once here and exit with a code the menu
+    // app can explain, instead of failing deep inside the capture setup.
+    if !CGPreflightScreenCaptureAccess() {
+        _ = CGRequestScreenCaptureAccess()
+        print("screen_capture_permission=missing")
+        fflush(stdout)
+        exit(4)
+    }
     let displayID = argumentValue("--display").flatMap { UInt32($0) } ?? CGMainDisplayID()
     let port = argumentValue("--port").flatMap { UInt16($0) } ?? 7777
     let fps = argumentValue("--fps").flatMap { Int($0) } ?? 60
