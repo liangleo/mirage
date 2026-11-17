@@ -9,7 +9,6 @@ import { SessionConfig, VideoFrame } from '../core/Protocol';
 import { GestureEvent } from '../input/GestureMapper';
 import { ContentRect } from '../input/InputGeometry';
 import { androidKeycode, ModifierTracker, unicodeFor } from '../input/KeyMapping';
-import { ControlDrawer } from '../ui/ControlDrawer';
 import { InputOverlay } from '../ui/InputOverlay';
 import { KeyboardDock } from '../ui/KeyboardDock';
 import { VideoSurface } from '../ui/VideoSurface';
@@ -29,7 +28,8 @@ struct StreamPage {
   @State private contentW: number = 0;
   @State private contentH: number = 0;
   @State private keyboardOn: boolean = false;
-  @State private drawerOpen: boolean = false;
+  @State private confirmDisconnect: boolean = false;
+  @State private toolbarOpen: boolean = false;
   @State private debugOn: boolean = Runtime.debugOn;
   @State private inputOn: boolean = Runtime.inputOn;
   @State private capsOk: boolean = true;
@@ -53,6 +53,7 @@ struct StreamPage {
   @State private remainSec: number = 0;
   private waitDeadlineMs: number = 0;
   private waitTimer: number = -1;
+  private confirmTimer: number = -1;
 
   aboutToAppear(): void {
     this.ownedSession = Runtime.session;
@@ -128,6 +129,10 @@ struct StreamPage {
     Runtime.onWaiting = (message: string, deadlineMs: number) => {
     };
     this.clearWait();
+    if (this.confirmTimer !== -1) {
+      clearTimeout(this.confirmTimer);
+      this.confirmTimer = -1;
+    }
     this.stopDecoder();
     const session = this.ownedSession;
     this.ownedSession = null;
@@ -268,7 +273,7 @@ struct StreamPage {
   }
 
   private inputActive(): boolean {
-    return this.inputOn && this.capsOk && this.gateEnabled && !this.drawerOpen;
+    return this.inputOn && this.capsOk && this.gateEnabled;
   }
 
   private applyInputCaps(): void {
@@ -294,19 +299,83 @@ struct StreamPage {
     }
   }
 
-  private openDrawer(): void {
-    const session = Runtime.session;
-    if (session !== null) {
-      session.releaseAll();
-    }
-    this.setKeyboard(false);
-    this.drawerOpen = true;
-    this.syncInput();
+  private inputReady(): boolean {
+    return this.capsOk && this.gateEnabled;
   }
 
-  private closeDrawer(): void {
-    this.drawerOpen = false;
+  
+  // 白 = 已开启，灰 = 未开启/不可用；断开用 normal→danger 表示警告
+  private inputGlyph(): Resource {
+    return this.inputOn && this.inputReady() ? $r('app.media.ic_input_normal') :
+      $r('app.media.ic_input_disabled');
+  }
+
+  private keyboardGlyph(): Resource {
+    return this.keyboardOn && this.capsOk ? $r('app.media.ic_keyboard_normal') :
+      $r('app.media.ic_keyboard_disabled');
+  }
+
+  private debugGlyph(): Resource {
+    return this.debugOn ? $r('app.media.ic_debug_normal') : $r('app.media.ic_debug_disabled');
+  }
+
+  private disconnectGlyph(): Resource {
+    return this.confirmDisconnect ? $r('app.media.ic_disconnect_danger') :
+      $r('app.media.ic_disconnect_disabled');
+  }
+
+  private toast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'toast failed: %{public}s', (err as Error).message);
+    }
+  }
+
+  private toggleInput(): void {
+    if (!this.capsOk) {
+      this.toast('服务端未开放输入');
+      return;
+    }
+    if (!this.gateEnabled) {
+      this.toast(this.gateReason.length > 0 ? this.gateReason : '输入已暂停');
+      return;
+    }
+    this.inputOn = !this.inputOn;
     this.syncInput();
+    this.saveUi();
+    this.toast(this.inputOn ? '触控已开启' : '触控已关闭');
+  }
+
+  private toggleKeyboard(): void {
+    const on = !this.keyboardOn;
+    this.setKeyboard(on);
+    this.toast(on ? '键盘已打开' : '键盘已关闭');
+  }
+
+  private toggleDebug(): void {
+    this.debugOn = !this.debugOn;
+    this.saveUi();
+    this.toast(this.debugOn ? '调试信息已开启' : '调试信息已关闭');
+  }
+
+  // 断开是破坏性操作：第一次点变红，3 秒内再点才真正断开
+  private requestDisconnect(): void {
+    if (!this.confirmDisconnect) {
+      this.confirmDisconnect = true;
+      this.confirmTimer = setTimeout(() => {
+        this.confirmTimer = -1;
+        this.confirmDisconnect = false;
+      }, 3000);
+      this.toast('再点一次断开连接');
+      return;
+    }
+    if (this.confirmTimer !== -1) {
+      clearTimeout(this.confirmTimer);
+      this.confirmTimer = -1;
+    }
+    this.confirmDisconnect = false;
+    this.disconnect();
   }
 
   private disconnect(): void {
@@ -420,7 +489,7 @@ struct StreamPage {
   }
 
   build() {
-    Stack({ alignContent: Alignment.TopEnd }) {
+    Stack({ alignContent: Alignment.BottomEnd }) {
       VideoSurface({
         configWidth: this.configWidth,
         configHeight: this.configHeight,
@@ -489,55 +558,63 @@ struct StreamPage {
         .hitTestBehavior(HitTestMode.None)
       }
 
-      if (!this.drawerOpen) {
-        Column() {
-          Column() {
+      // 右上角抽屉：收起时只剩齿轮，展开为 调试/输入/键盘/断开 + 关闭
+      Column({ space: 0 }) {
+        if (this.toolbarOpen) {
+          Stack() {
+            Image(this.debugGlyph()).width(40).height(40)
           }
-          .width('100%')
-          .height(80)
-          .borderRadius({ topLeft: 7, bottomLeft: 7 })
-          .backgroundColor('#66000000')
+          .width(40)
+          .height(40)
           .onClick(() => {
-            this.openDrawer();
+            this.toggleDebug();
+          })
+          Stack() {
+            Image(this.inputGlyph()).width(40).height(40)
+          }
+          .width(40)
+          .height(40)
+          .onClick(() => {
+            this.toggleInput();
+          })
+          Stack() {
+            Image(this.keyboardGlyph()).width(40).height(40)
+          }
+          .width(40)
+          .height(40)
+          .onClick(() => {
+            this.toggleKeyboard();
+          })
+          Stack() {
+            Image(this.disconnectGlyph()).width(40).height(40)
+          }
+          .width(40)
+          .height(40)
+          .onClick(() => {
+            this.requestDisconnect();
           })
         }
-        .width(14)
-        .height('100%')
-        .justifyContent(FlexAlign.Center)
-      }
-
-      if (this.drawerOpen) {
-        ControlDrawer({
-          inputOn: this.inputOn,
-          keyboardOn: this.keyboardOn,
-          debugOn: this.debugOn,
-          capsOk: this.capsOk,
-          gateEnabled: this.gateEnabled,
-          gateReason: this.gateReason,
-          onToggleInput: () => {
-            this.inputOn = !this.inputOn;
-            this.syncInput();
-            this.saveUi();
-          },
-          onToggleKeyboard: () => {
-            const turnOn = !this.keyboardOn;
-            if (turnOn) {
-              this.closeDrawer();
-            }
-            this.setKeyboard(turnOn);
-          },
-          onToggleDebug: () => {
-            this.debugOn = !this.debugOn;
-            this.saveUi();
-          },
-          onDisconnect: () => {
-            this.disconnect();
-          },
-          onClose: () => {
-            this.closeDrawer();
+        if (this.toolbarOpen) {
+          Stack() {
+            Image($r('app.media.ic_close_normal')).width(40).height(40)
           }
-        })
+          .width(40)
+          .height(40)
+          .onClick(() => {
+            this.toolbarOpen = false;
+          })
+        } else {
+          Stack() {
+            Image($r('app.media.ic_gear_disabled')).width(20).height(20)
+          }
+          .width(40)
+          .height(40)
+          .onClick(() => {
+            this.toolbarOpen = true;
+          })
+        }
       }
+      .margin({ bottom: 10, right: 6 })
     if (this.waiting) {
         Column({ space: 14 }) {
           LoadingProgress().width(56).height(56).color(Color.White)

@@ -168,6 +168,7 @@ make test.harmony    # 构建 ohosTest HAP 并在设备上跑单测
 
 - 连接方式与 Android 客户端一致：AUTO / Wi-Fi / TCP / USB 四种通道。AUTO 在检测到 Mirage USB 配件时优先走 USB，否则退回 mDNS 发现的 Wi-Fi；Wi-Fi 填了 64 位十六进制指纹走 TLS，否则明文连 TCP 端口。点「发现 Mac」用 mDNS 自动填地址。
 - TCP 模式（USB 调试通道）需要先 `make connect.harmony` 做 hdc 端口反向转发。
+- 连接后右下角有齿轮按钮：点开是 调试 / 输入 / 键盘 / 断开 四枚按钮，底部 X 收回；白 = 开启、灰 = 关闭，断开为灰→红两击确认。
 - **USB 为实验特性**，需要 Mac 端 AOA 桥：菜单栏 App 打开「USB 免调试连接（AOA）」，或手动运行 `build/aoa_bridge --port 7777`（此时 helper 以 `--mode extend --port 7777` 的 loopback 模式启动）。
 - 首次 USB 连接会弹系统授权，需同意；拒绝后本次会话停止重试，重新点「连接」可再试。
 - 部分厂商 ROM 的 accessory 通道可能不通，此时回退 Wi-Fi 使用。

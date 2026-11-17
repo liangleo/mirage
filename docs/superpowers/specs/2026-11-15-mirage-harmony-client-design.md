@@ -4,7 +4,7 @@
 上位设计：[Mirage 设计文档](2026-11-13-mirage-design.md)（协议、Mac 端、验收标准以该文档为准，本文只写客户端差异）
 输入协议：[M5 输入回传设计](2026-11-14-mirage-input-design.md)
 
-**实现状态**：H1（Wi-Fi TCP/TLS 出画面）、H3（输入与控制抽屉）、H4（USB AOA + AUTO 降级）已落地；FEEDBACK（10Hz 接收状态上报）已实现并驱动 Mac 端自适应码率；H2 的 UDP 视频仍未实现——客户端解析到 `UDP_CONFIG` 后忽略，Mac 端在收不到 UDP 握手前继续走 TCP。本轮另有三处平台经验固化：TLS 固定 1.2、AUTO 插线自动回切 USB、Mac 服务开启即同时提供 USB + Wi-Fi（运行中经回环控制通道启停，不重启捕获）。正文已按实到代码修订。
+**实现状态**：H1（Wi-Fi TCP/TLS 出画面）、H3（输入与控制工具条）、H4（USB AOA + AUTO 降级）已落地；FEEDBACK（10Hz 接收状态上报）已实现并驱动 Mac 端自适应码率；H2 的 UDP 视频仍未实现——客户端解析到 `UDP_CONFIG` 后忽略，Mac 端在收不到 UDP 握手前继续走 TCP。本轮另有三处平台经验固化：TLS 固定 1.2、AUTO 插线自动回切 USB、Mac 服务开启即同时提供 USB + Wi-Fi（运行中经回环控制通道启停，不重启捕获）。正文已按实到代码修订。
 
 ---
 
@@ -72,10 +72,9 @@ entry/src/main/ets/
 ├── entryability/EntryAbility.ets        # 窗口、全屏、常亮
 ├── pages/
 │   ├── ConnectPage.ets                  # 连接页 + 设置面板
-│   └── StreamPage.ets                   # 全屏播放 + 控制面板 + 统计浮层
+│   └── StreamPage.ets                   # 全屏视频 + 右下角工具条 + 统计浮层
 ├── ui/
 │   ├── VideoSurface.ets                 # XComponent 封装，暴露 surfaceId
-│   ├── ControlDrawer.ets                # 右侧抽屉（输入/键盘/调试/断开）
 │   ├── InputOverlay.ets                 # 触控采集与本地触点提示
 │   ├── KeyboardDock.ets                 # 软键盘桥
 │   └── StatsOverlay.ets
@@ -282,8 +281,10 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 
 ## 9. 输入
 
-- 采集：XComponent `onTouch`（含 `touches` 多点、`toolType`、压力、倾斜），归一化到画面内容区（去黑边）；抽屉可见时不转发输入。
-- 控制抽屉只通过**手动点击右侧 14vp 窄条**打开——早期实现的「右缘 15% 起滑」在宽屏上把整块右侧都算成边缘，误触频繁，已移除；该窄条不拦截视频区触摸。
+- 采集：XComponent `onTouch`（含 `touches` 多点、`toolType`、压力、倾斜），归一化到画面内容区（去黑边）；工具条只由按钮自身拦截触摸，其余区域照常转发给 Mac。
+- 播放页工具条：右下角常驻**半透明灰色齿轮（20vp）**，点击后从齿轮位置向上展开 调试 / 输入 / 键盘 / 断开 四枚 40vp 按钮，底部 X 收回齿轮；纯透明无底色。早期「右缘 15% 起滑」与右侧 14vp 把手方案已弃用。
+- 状态语义：白 = 已开启，灰 = 未开启/不可用，断开为 灰 → 红（danger）两击确认；点击后均有 Toast 文案（触控已开启/关闭、键盘已打开/关闭、再点一次断开连接）。
+- 图标资源：`assets/icon/{input,keyboard,disconnect,debug,gear,close}/`，前三个由 `tools/extract_icons.py` 从 `preview_contact_sheet.png` 第三排切出（按 alpha 连通域、核心 52/96 居中，四态同比例），其余由 `tools/gen_extra_icons.py` 自绘；同步到 `resources/base/media/ic_<action>_<state>.png`。
 - 手势语义在客户端：与 `GestureMapper` 直译（长按 500ms→右键、双指滚动、捏合→⌘ 滚动、笔/橡皮擦、悬停）。
 - 键盘：硬件 `onKeyEvent` → KeyMapping → KEY；软键盘用隐藏 `TextInput`，`onChange` 差量 → TEXT，退格 → KEY，回车 → TEXT "\n"。
 - 服务端门控：`CTRL INPUT_ENABLED(3)` / `INPUT_DISABLED(4, reason)` 决定是否允许发送；面板上有输入开关；关闭或页面切走时 `releaseAll`（CTRL 2）。
@@ -293,7 +294,7 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 
 - **连接页**：状态文案、连接/断开、AUTO/Wi-Fi/TCP/USB 模式切换、发现 Mac、扫码配对、手动地址、配对链接粘贴；连接中禁用按钮、显示进度。
 - **配对入口**：粘贴配对链接与扫码都可用。扫码用 `@kit.ScanKit` 的 `scanBarcode.startScanForResult`，系统扫码 UI 自带相机权限，App 不声明 CAMERA（已在本机验证，§16 #5）。
-- **播放页**：全屏视频 + 右侧抽屉（输入开关、键盘、调试信息、断开连接）+ 右侧 14vp 把手；无返回按钮，退出走抽屉「断开连接」。调试浮层默认关闭，打开后显示在**左上角**（不再放左下角）。
+- **播放页**：全屏视频 + 右下角齿轮吸附的工具条（调试/输入/键盘/断开 + X 收回）；无返回按钮，退出走工具条「断开」。调试浮层默认关闭，打开后显示在**左上角**（不再放左下角）。
 - **持久化**（preferences，键名沿用 Android 并新增 UI 项）：`host`、`port`、`fingerprint`、`device_id`、`transportMode`、`debugOn`、`inputOn`。传输模式与手填地址在下次启动恢复；调试信息与输入开关作为用户选择持久化（不再每次配置强制打开），键盘开关刻意不持久化。配对地址只在 **Wi-Fi 连接成功时**回写，USB/TCP 连接不会冲掉已配对地址。
 - **HELLO 设备信息**：屏幕像素宽高、DPI、刷新率、旋转、`deviceInfo.productModel`；每次连接与每次旋转后重建（重连流程）。
 
@@ -339,7 +340,7 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 ## 15. 留给实现者的决定
 
 - 状态机内部实现（类还是闭包）与事件命名细节。
-- 控制抽屉的具体布局与图标（已定：右侧 14vp 手动把手，右缘手势方案已弃用）。
+- 控制工具条的布局与图标（已定：右下角齿轮吸附、向上展开四键 + X 收回；图标由 `assets/icon` 的切图/自绘脚本生成，右缘手势与竖条把手方案已弃用）。
 - `StatsOverlay` 的排版与刷新频率。
 - native 桥中 threadsafe function 的具体回调粒度（逐帧 vs 批事件）。
 - 解码器低延迟参数的具体探测方式。
