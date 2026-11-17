@@ -4,6 +4,7 @@ import {
   MessageType,
   Hello,
   encodeHello,
+  encodeFeedback,
   encodePing,
   decodePing,
   decodeSessionConfig,
@@ -64,6 +65,24 @@ export default function protocolTest() {
       expect(frame.length).assertEqual(37);
       expect(frame[4]).assertEqual(MessageType.HELLO);
       expect(frame[36]).assertEqual(0);
+    });
+
+    it('encodes feedback fields big-endian', 0, () => {
+      const frame = encodeFeedback(600, 17, 3, 1, 22, 0, 12000000, 150, 1700000000000000);
+      expect(frame.length).assertEqual(33);
+      const view = new DataView(frame.buffer);
+      expect(view.getUint32(0)).assertEqual(29);
+      expect(frame[4]).assertEqual(MessageType.FEEDBACK);
+      expect(view.getUint16(5)).assertEqual(600);
+      expect(view.getUint16(7)).assertEqual(17);
+      expect(view.getUint16(9)).assertEqual(3);
+      expect(view.getUint16(11)).assertEqual(1);
+      expect(view.getUint16(13)).assertEqual(22);
+      expect(view.getUint16(15)).assertEqual(0);
+      expect(view.getUint32(17)).assertEqual(12000000);
+      expect(view.getUint32(21)).assertEqual(150);
+      expect(view.getUint32(25)).assertEqual(Math.floor(1700000000000000 / 4294967296));
+      expect(view.getUint32(29)).assertEqual(1700000000000000 % 4294967296);
     });
 
     it('decodes session config from vectors', 0, () => {

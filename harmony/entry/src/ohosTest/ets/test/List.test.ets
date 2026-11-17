@@ -12,6 +12,7 @@ import selectorTest from './Selector.test';
 import fingerprintTest from './Fingerprint.test';
 import discoveryPolicyTest from './Discovery.test';
 import sessionMachineTest from './SessionMachine.test';
+import statsTest from './Stats.test';
 import nativeBridgeTest from './NativeBridge.test';
 import usbDeviceTest from './UsbDevice.test';
 import usbTransportTest from './UsbTransport.test';
@@ -31,6 +32,7 @@ export default function testsuite() {
   fingerprintTest();
   discoveryPolicyTest();
   sessionMachineTest();
+  statsTest();
   nativeBridgeTest();
   usbDeviceTest();
   usbTransportTest();

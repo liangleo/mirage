@@ -69,7 +69,7 @@ export class TlsTransport implements Transport {
     await sock.bind({ address: '0.0.0.0', port: 0, family: 1 });
     await sock.connect({
       address: { address: this.host, port: this.port, family: 1 },
-      secureOptions: { protocols: [socket.Protocol.TLSv12, socket.Protocol.TLSv13] },
+      secureOptions: { protocols: [socket.Protocol.TLSv12] },
       skipRemoteValidation: true,
       timeout: 5000
     });

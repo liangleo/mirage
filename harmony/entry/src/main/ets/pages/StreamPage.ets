@@ -3,6 +3,7 @@ import { window } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { closeDecoder, DecoderEvent, onEvent, openDecoder, submitVideo } from 'libmirage.so';
 import { Runtime } from '../core/Runtime';
+import { ClientSession } from '../core/ClientSession';
 import { KeyAction, KeyInput, TextInput as TextInputMessage } from '../core/InputProtocol';
 import { SessionConfig, VideoFrame } from '../core/Protocol';
 import { GestureEvent } from '../input/GestureMapper';
@@ -29,8 +30,8 @@ struct StreamPage {
   @State private contentH: number = 0;
   @State private keyboardOn: boolean = false;
   @State private drawerOpen: boolean = false;
-  @State private debugOn: boolean = false;
-  @State private inputOn: boolean = true;
+  @State private debugOn: boolean = Runtime.debugOn;
+  @State private inputOn: boolean = Runtime.inputOn;
   @State private capsOk: boolean = true;
   @State private gateEnabled: boolean = true;
   @State private gateReason: string = '';
@@ -43,8 +44,18 @@ struct StreamPage {
   private rxFrames: number = 0;
   private decodedFrames: number = 0;
   private tracker: ModifierTracker = new ModifierTracker();
+  // 本页开始时的那条会话；退栈时只停它，不能误停 AUTO 降级新建的会话
+  private ownedSession: ClientSession | null = null;
+  // 降级重连可能在本页退栈前再次失败，防止连续 router.back() 多弹一层
+  private closing: boolean = false;
+  @State private waiting: boolean = false;
+  @State private waitingText: string = '';
+  @State private remainSec: number = 0;
+  private waitDeadlineMs: number = 0;
+  private waitTimer: number = -1;
 
   aboutToAppear(): void {
+    this.ownedSession = Runtime.session;
     this.applyWindow(true);
     onEvent((event: DecoderEvent) => {
       if (event.kind === 'frame') {
@@ -59,6 +70,8 @@ struct StreamPage {
     Runtime.onConfig = (config: SessionConfig) => {
       Runtime.config = config;
       Runtime.hasConfig = true;
+      this.ownedSession = Runtime.session;
+      this.clearWait();
       this.configWidth = config.width;
       this.configHeight = config.height;
       this.statusText = '';
@@ -73,9 +86,25 @@ struct StreamPage {
       this.gateReason = reason;
       this.syncInput();
     };
+    // 短暂断线时留在本页等重连，用遮罩 + 倒计时提示；到期才退回连接页
+    Runtime.onWaiting = (message: string, deadlineMs: number) => {
+      this.waitingText = message;
+      this.waitDeadlineMs = deadlineMs;
+      this.waiting = true;
+      this.tickWait();
+      if (this.waitTimer === -1) {
+        this.waitTimer = setInterval(() => {
+          this.tickWait();
+        }, 500);
+      }
+    };
     // 会话彻底结束（重试耗尽或 Mac 侧关闭）后不能停在冻结的画面，退回连接页等待
     Runtime.onClosed = (reason: string) => {
       hilog.info(DOMAIN, TAG, 'session closed: %{public}s; back to connect', reason);
+      if (this.closing) {
+        return;
+      }
+      this.closing = true;
       router.back();
     };
     if (Runtime.hasConfig) {
@@ -96,14 +125,21 @@ struct StreamPage {
     };
     Runtime.onClosed = (reason: string) => {
     };
+    Runtime.onWaiting = (message: string, deadlineMs: number) => {
+    };
+    this.clearWait();
     this.stopDecoder();
-    const session = Runtime.session;
+    const session = this.ownedSession;
+    this.ownedSession = null;
     if (session !== null) {
       session.releaseAll();
       session.stop();
     }
-    Runtime.session = null;
-    Runtime.hasConfig = false;
+    // 退栈回调可能比降级重连晚几百毫秒；此时 Runtime.session 已是新会话，不能清
+    if (Runtime.session === session) {
+      Runtime.session = null;
+      Runtime.hasConfig = false;
+    }
   }
 
   onPageHide(): void {
@@ -237,7 +273,6 @@ struct StreamPage {
 
   private applyInputCaps(): void {
     this.capsOk = (Runtime.config.inputCaps & 0x01) !== 0;
-    this.inputOn = this.capsOk;
     this.syncInput();
   }
 
@@ -245,6 +280,17 @@ struct StreamPage {
     const session = Runtime.session;
     if (session !== null) {
       session.setInputEnabled(this.inputActive());
+    }
+  }
+
+  private saveUi(): void {
+    Runtime.debugOn = this.debugOn;
+    Runtime.inputOn = this.inputOn;
+    const store = Runtime.store;
+    if (store !== null) {
+      store.saveUi(this.debugOn, this.inputOn).catch((err: Error) => {
+        hilog.warn(DOMAIN, TAG, 'save ui settings failed: %{public}s', err.message);
+      });
     }
   }
 
@@ -271,6 +317,27 @@ struct StreamPage {
     }
     Runtime.session = null;
     router.back();
+  }
+
+  private tickWait(): void {
+    const left = Math.max(0, Math.ceil((this.waitDeadlineMs - Date.now()) / 1000));
+    this.remainSec = left;
+    if (left > 0) {
+      return;
+    }
+    this.clearWait();
+    if (!this.closing) {
+      this.closing = true;
+      router.back();
+    }
+  }
+
+  private clearWait(): void {
+    this.waiting = false;
+    if (this.waitTimer !== -1) {
+      clearInterval(this.waitTimer);
+      this.waitTimer = -1;
+    }
   }
 
   private setKeyboard(on: boolean): void {
@@ -450,6 +517,7 @@ struct StreamPage {
           onToggleInput: () => {
             this.inputOn = !this.inputOn;
             this.syncInput();
+            this.saveUi();
           },
           onToggleKeyboard: () => {
             const turnOn = !this.keyboardOn;
@@ -460,6 +528,7 @@ struct StreamPage {
           },
           onToggleDebug: () => {
             this.debugOn = !this.debugOn;
+            this.saveUi();
           },
           onDisconnect: () => {
             this.disconnect();
@@ -468,6 +537,18 @@ struct StreamPage {
             this.closeDrawer();
           }
         })
+      }
+    if (this.waiting) {
+        Column({ space: 14 }) {
+          LoadingProgress().width(56).height(56).color(Color.White)
+          Text(this.waitingText).fontSize(16).fontColor(Color.White)
+          Text(`等待重连 ${this.remainSec}s`).fontSize(14).fontColor('#AAAAAA')
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#99000000')
+        .hitTestBehavior(HitTestMode.Block)
       }
     }
     .width('100%')

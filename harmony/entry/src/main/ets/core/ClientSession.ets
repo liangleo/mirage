@@ -2,6 +2,7 @@ import {
   decodePing,
   decodeSessionConfig,
   decodeVideo,
+  encodeFeedback,
   encodeHello,
   encodePing,
   Frame,
@@ -41,6 +42,7 @@ import {
 } from './InputProtocol';
 
 const PING_INTERVAL_MS = 1000;
+const FEEDBACK_INTERVAL_MS = 100;
 const LIVENESS_TIMEOUT_MS = 3000;
 const WATCHDOG_INTERVAL_MS = 500;
 const MAX_E2E_MS = 10000;
@@ -86,6 +88,7 @@ export class ClientSession {
   private pendingPingAtMs: number = 0;
   private clockOffsetMicros: number = NaN;
   private pingTimer: number = -1;
+  private feedbackTimer: number = -1;
   private watchdogTimer: number = -1;
   private retryTimer: number = -1;
 
@@ -370,6 +373,30 @@ export class ClientSession {
         this.onTransportClosed(this.generation, '连接无响应');
       }
     }, WATCHDOG_INTERVAL_MS);
+    // 10Hz 上报接收状态，让 Mac 端的 FeedbackController 能按延迟/积压降码率
+    this.feedbackTimer = setInterval(() => {
+      this.sendFeedback();
+    }, FEEDBACK_INTERVAL_MS);
+  }
+
+  private sendFeedback(): void {
+    if (!this.connected || this.transport === null) {
+      return;
+    }
+    const rtt = this.stats.currentRttMs();
+    const e2e = this.stats.currentE2eMs();
+    const queueDepth = this.decoder.pendingTotal > 0 ? 1 : 0;
+    this.send(encodeFeedback(
+      Math.min(65535, Math.max(0, this.stats.currentFpsX10())),
+      Math.min(65535, Math.max(0, Math.floor(this.stats.currentDecodeMs()))),
+      Math.min(65535, Math.max(0, this.stats.currentDropped())),
+      queueDepth,
+      Math.min(65535, rtt >= 0 ? rtt : 0),
+      0,
+      Math.min(4294967295, Math.max(0, this.stats.currentBitrateBps())),
+      Math.min(4294967295, e2e >= 0 ? e2e : 0),
+      Date.now() * 1000
+    ));
   }
 
   private maybeSendPing(): void {
@@ -416,6 +443,10 @@ export class ClientSession {
     if (this.watchdogTimer !== -1) {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = -1;
+    }
+    if (this.feedbackTimer !== -1) {
+      clearInterval(this.feedbackTimer);
+      this.feedbackTimer = -1;
     }
     if (this.retryTimer !== -1) {
       clearTimeout(this.retryTimer);

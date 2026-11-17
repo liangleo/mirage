@@ -21,12 +21,25 @@ export class Settings {
   port: number = 0;
   fingerprintHex: string = '';
   transportMode: TransportMode = TransportMode.AUTO;
+  debugOn: boolean = false;
+  inputOn: boolean = true;
 }
 
 const KEY_HOST = 'host';
 const KEY_PORT = 'port';
 const KEY_FINGERPRINT = 'fingerprint';
 const KEY_DEVICE_ID = 'device_id';
+const KEY_TRANSPORT = 'transportMode';
+const KEY_DEBUG = 'debugOn';
+const KEY_INPUT = 'inputOn';
+
+function parseMode(value: string): TransportMode {
+  if (value === TransportMode.USB || value === TransportMode.WIFI ||
+    value === TransportMode.TCP || value === TransportMode.AUTO) {
+    return value;
+  }
+  return TransportMode.AUTO;
+}
 
 function toHex(bytes: Uint8Array): string {
   let out = '';
@@ -48,8 +61,28 @@ export class SettingsStore {
     settings.host = this.kv.getString(KEY_HOST);
     settings.port = this.kv.getInt(KEY_PORT);
     settings.fingerprintHex = this.kv.getString(KEY_FINGERPRINT);
-    // 传输方式每次启动都回到 AUTO：上次选的 USB 存下来后，掉线就再也回不到自动降级。
+    settings.transportMode = parseMode(this.kv.getString(KEY_TRANSPORT));
+    // 字符串比较：未设置时 inputOn 默认为开
+    settings.debugOn = this.kv.getString(KEY_DEBUG) === '1';
+    settings.inputOn = this.kv.getString(KEY_INPUT) !== '0';
     return settings;
+  }
+
+  async saveUi(debugOn: boolean, inputOn: boolean): Promise<void> {
+    this.kv.putString(KEY_DEBUG, debugOn ? '1' : '0');
+    this.kv.putString(KEY_INPUT, inputOn ? '1' : '0');
+    await this.kv.flush();
+  }
+
+  async saveMode(mode: TransportMode): Promise<void> {
+    this.kv.putString(KEY_TRANSPORT, mode);
+    await this.kv.flush();
+  }
+
+  async saveAddress(host: string, port: number): Promise<void> {
+    this.kv.putString(KEY_HOST, host);
+    this.kv.putInt(KEY_PORT, port);
+    await this.kv.flush();
   }
 
   async savePairing(host: string, port: number, fingerprintHex: string): Promise<void> {

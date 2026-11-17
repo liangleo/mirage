@@ -1,10 +1,10 @@
 # Mirage 鸿蒙原生客户端设计
 
-版本：v1.1（2026-11-17，按 H1/H3/H4 已实现代码同步；H2 UDP 未实现）
+版本：v1.2（2026-11-17，实现收尾同步：AUTO 回切 USB、统一重连、FEEDBACK、Mac 服务模型；H2 UDP 仍待实现）
 上位设计：[Mirage 设计文档](2026-11-13-mirage-design.md)（协议、Mac 端、验收标准以该文档为准，本文只写客户端差异）
 输入协议：[M5 输入回传设计](2026-11-14-mirage-input-design.md)
 
-**实现状态**：H1（Wi-Fi TCP/TLS 出画面）、H3（输入与控制抽屉）、H4（USB AOA + AUTO 降级）已落地；H2（UDP 视频）尚未立计划——客户端解析到 `UDP_CONFIG` 后直接忽略，Mac 端在收不到 UDP 握手前继续走 TCP 视频。正文已按实到代码修订，未实现项在各节标注。
+**实现状态**：H1（Wi-Fi TCP/TLS 出画面）、H3（输入与控制抽屉）、H4（USB AOA + AUTO 降级）已落地；FEEDBACK（10Hz 接收状态上报）已实现并驱动 Mac 端自适应码率；H2 的 UDP 视频仍未实现——客户端解析到 `UDP_CONFIG` 后忽略，Mac 端在收不到 UDP 握手前继续走 TCP。本轮另有三处平台经验固化：TLS 固定 1.2、AUTO 插线自动回切 USB、Mac 服务开启即同时提供 USB + Wi-Fi（运行中经回环控制通道启停，不重启捕获）。正文已按实到代码修订。
 
 ---
 
@@ -109,7 +109,7 @@ entry/src/main/cpp/
 └── bridge.cpp                           # 导出：startUsb/stopUsb/usbWrite/openDecoder/submitVideo/...
 ```
 
-H2（UDP）未实现，故没有 `core/UdpProtocol.ets`、`core/FeedbackReporter.ets`、`cpp/udp_receiver.cpp`、`cpp/frame_decoder.cpp`；拆帧统一在 ArkTS `Protocol.ets` 的 `FrameDecoder`。
+H2 的 UDP 视频未实现，故没有 `core/UdpProtocol.ets`、`cpp/udp_receiver.cpp`、`cpp/frame_decoder.cpp`；拆帧统一在 ArkTS `Protocol.ets` 的 `FrameDecoder`。FEEDBACK 已实现：28 字节编码在 `Protocol.ets`，10Hz 上报在 `ClientSession.ets`（`FEEDBACK_INTERVAL_MS = 100`）。
 
 ### 4.2 数据流与线程
 
@@ -184,7 +184,8 @@ Android 版的状态散落在 Activity 字段与回调里。鸿蒙版把它抽�
 
 **规则（与 Android 对齐）**
 
-- 重连退避：`500ms × 2^(n-1)`，上限 5s，最多 10 次；`manualDisconnect` 或 `autoReconnectEnabled=false` 时不重连。
+- 重连退避：Wi-Fi/TCP 先由会话内部按 `500ms × 2^(n-1)`（上限 5s、最多 10 次）重试；耗尽后由连接页接管，每 5 秒重试一次，窗口 5 分钟（AUTO 每次重试从 USB 优先开始）。窗口到期、用户手动断开或切模式即停止。
+- 断线期间不退回连接页：播放页保留，`Runtime.onWaiting(message, deadline)` 驱动菊花 + 倒计时；永久错误（指纹不匹配、USB 授权拒绝/超时）直接 `Runtime.onClosed` 退栈。
 - 每个连接代次（generation）自增；旧代次的回调一律丢弃，防止串台。
 - `SESSION_CONFIG` 到达即视为连接成功（重置重连计数）。
 - 心跳：每 1s 发 PING；3s 无任何入站帧判定"连接无响应"。
@@ -198,7 +199,8 @@ Android 版的状态散落在 Activity 字段与回调里。鸿蒙版把它抽�
 |---|---|---|
 | `net/Protocol.kt` | `core/Protocol.ets` | 直译：帧编解码、HELLO 32+name、SESSION_CONFIG 11/12 字节、VIDEO 18 字节头、PING u64、单帧上限 8MiB、未知 type 忽略 |
 | `net/MirageClient.kt` | `core/ClientSession.ets` | 直译：读循环、PING/PONG 与时钟偏移、e2e 计算、BYE、CTRL 3/4、`UDP_CONFIG` 忽略（H2 未实现） |
-| `net/UdpProtocol.kt` / `net/UdpVideoReceiver.kt` / `net/UdpCrypto.kt` / `net/FeedbackReporter.kt` | — | **未实现（H2 待立计划）**：客户端忽略 `UDP_CONFIG`；等服务端收到 UDP 握手前视频继续走 TCP |
+| `net/UdpProtocol.kt` / `net/UdpVideoReceiver.kt` / `net/UdpCrypto.kt` | — | **未实现（H2 待立计划）**：客户端忽略 `UDP_CONFIG`；等服务端收到 UDP 握手前视频继续走 TCP |
+| `net/FeedbackReporter.kt` | `core/Protocol.ets` + `core/ClientSession.ets` | 10Hz 上报 28 字节反馈（fps/解码/丢帧/队列/RTT/码率/到达延迟），驱动 Mac 端码率自适应 |
 | `net/TransportSelector.kt` | `transport/TransportSelector.ets` | 纯函数直译（AUTO 优先 accessory，其次已配置 Wi-Fi，最后 127.0.0.1:7777） |
 | `net/TlsStreamConnection.kt` | `transport/TlsTransport.ets` | 连接后取对端证书 DER → SHA-256 → 与二维码指纹常量时间比较 → 不匹配立即断开（未发 HELLO） |
 | `net/StreamConnection.kt` | `transport/*.ets` + native | USB 由 native 读字节、ArkTS 拆帧（§4.2） |
@@ -233,7 +235,11 @@ Android 版的状态散落在 Activity 字段与回调里。鸿蒙版把它抽�
 3. 否则做一次 mDNS 发现（5s 超时）；发现且指纹一致 → Wi-Fi TLS；发现但指纹不一致 → 停下提示扫码，绝不自动连接；
 4. 都没有 → TCP `127.0.0.1:7777`（开发兜底）。
 
-连接失败时按当前通道推进到下一级：USB 失败 → 跳过 USB 重试（Wi-Fi/TCP）；Wi-Fi 失败 → TCP。串流中断线同样走这条链，重连前留 50ms 等串流页退栈完成（它的 `aboutToDisappear` 会 stop 当前会话）。
+连接失败时按当前通道推进到下一级：USB 失败 → 跳过 USB 重试（Wi-Fi/TCP）；Wi-Fi 失败 → TCP。
+
+**断线与重连（各模式统一）**：不再立即退回连接页。播放页保留最后一帧，叠加菊花 + 倒计时遮罩，窗口 5 分钟、每 5 秒重试一次；期限到才回连接页。AUTO 的重试从 USB 优先开始（数据线可用就直接连 USB）；AUTO 在 Wi-Fi/TCP 上串流时每 3 秒轮询配件，配件出现即停旧会话、切回 USB，连续 3 次切换失败则停手（配件消失后重置）。显式 Wi-Fi 模式不会切 USB。永久错误（证书指纹不匹配、USB 授权被拒绝/超时）直接停止并回连接页。
+
+Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这样插线后配件一定出现；helper 与开关均见 §7.5。
 
 ### 7.2 USB（实验特性）
 
@@ -247,7 +253,8 @@ Android 版的状态散落在 Activity 字段与回调里。鸿蒙版把它抽�
 ### 7.3 Wi-Fi
 
 - TCP 明文：仅回环地址（`127.0.0.0/8`、`localhost`、`::1`）允许，对应 `adb reverse`/`hdc fport` 开发路径。
-- 非回环：必须 TLS。`TLSSocket.connect({ address, secureOptions: { protocol: TLSv1.2+, }, skipRemoteValidation: true })` → `getRemoteCertificate()` → SHA-256 → 与设置里的指纹比较 → 不一致立即 `close()` 并报"证书指纹不匹配"。
+- 非回环：必须 TLS。`TLSSocket.connect({ address, secureOptions: { protocols: [TLSv1.2] }, skipRemoteValidation: true })` → `getRemoteCertificate()` → SHA-256 → 与设置里的指纹比较 → 不一致立即 `close()` 并报"证书指纹不匹配"。
+- **固定 TLS 1.2**：HarmonyOS 的 TLS 1.3 收包路径在一个 16KB 记录之后会停顿数秒，大帧（关键帧）因此要几秒才能收完；固定 1.2 实测 16KB 记录 33ms 内到齐、e2e 回到 6–42ms。服务端最低 1.2，强制 1.2 不损失兼容性。
 - 指纹来源：扫码 / 粘贴配对链接 / mDNS TXT 中与已存指纹一致时自动连接。
 - `TCP_NODELAY`：鸿蒙 TCP socket 通过 `setExtraOptions({ tcpNoDelay: true })` 开启，等价 Android。
 
@@ -256,13 +263,22 @@ Android 版的状态散落在 Activity 字段与回调里。鸿蒙版把它抽�
 - 客户端目前解析到 `UDP_CONFIG` 后直接忽略；Mac 端在收到 UDP 握手前继续发 TCP 视频，Wi-Fi 出画面不受影响。
 - H2 若启动，按原设计：收到 `UDP_CONFIG` 后把 `host/port/key/noncePrefix` 交给 native，POSIX UDP socket + AES-256-GCM 解密 + 重组 + NACK 全部在 native（ArkTS 单次 AES-GCM 往返 0.81ms，25Mbps 档约 2600 包/秒，放在 JS 会吃掉约一个核），就绪后发 `UDP_READY` 并忽略 TCP 视频。
 
+### 7.5 Mac 端服务模型（本轮落地）
+
+- 一个 helper 进程同时提供：`127.0.0.1:7777` 明文（AOA 桥用）+ `0.0.0.0:7778` TLS + mDNS `_mirage._tcp`；helper 只接受一个客户端。
+- 菜单只保留「开启/关闭服务」，不再有独立的 USB/Wi-Fi 开关：开启服务 = 拉起 helper + 开 Wi-Fi + 启动 AOA 桥；关闭服务 = 停桥 + 停 helper。
+- 运行中开关 Wi-Fi 走回环控制通道 `127.0.0.1:7779`（`wifi on|off|status`，一行命令一行应答），不重启捕获、虚拟显示器或 USB 会话。带 `--control-port` 启动的 helper 在就绪时直接开 Wi-Fi，避免菜单在启动窗口期抢时序失败。
+- AOA 桥常驻等待设备（无设备不退出）；服务开启时线没插也能在插入后自动切 AOA。
+- macOS 菜单栏「停止共享」会停掉 `SCStream`：helper 通过 `SCStreamDelegate.didStopWithError` 感知后自行退出，菜单显示「已停止」，同时停掉 AOA 桥（避免桥对着已死 helper 无限重连）。
+- 安全边界：控制端口只绑定回环；Wi-Fi 仍强制 TLS + 指纹固定，明文端口只绑定回环。
+
 ## 8. 解码与渲染
 
 - `XComponent({ type: 'surface' })` + `XComponentController.getXComponentSurfaceId()`；surface 变化（旋转、后台恢复）时 `setSurface` 触发解码器重建。
 - 解码器建议默认 surface 模式；若 `SetSurface` 或首帧超时，回退 buffer 模式（NV12）并用 `OH_NativeWindow` 手动送帧或走 ArkTS 渲染（回退路径只求可用，不追延迟）。
 - 渲染比例：等比适配、居中、黑边；`AspectRatio` 按 SESSION_CONFIG 宽高，`StreamPage` 在收到 config 后更新。
 - 常亮：窗口 `keepScreenOn`；全屏与隐藏系统栏由 EntryAbility 设置。
-- 统计：`StatsOverlay` 显示 fps / Mbps / drop / decode / e2e / rtt / 连接通道 / 输入状态，数据来自 `Stats`，500ms 刷新。
+- 统计：`StatsOverlay`（默认关闭，位于左上角）显示 `fps · Mbps · drop · p95` 与 `decode · e2e · RTT · 编码`，500ms 刷新；每次刷新都读取 `Runtime.stats` 当前实例，切通道后不会冻结。p95 是 e2e 的 300 样本滚动窗口（约 5s）。
 
 ## 9. 输入
 
@@ -278,7 +294,7 @@ Android 版的状态散落在 Activity 字段与回调里。鸿蒙版把它抽�
 - **连接页**：状态文案、连接/断开、AUTO/Wi-Fi/TCP/USB 模式切换、发现 Mac、扫码配对、手动地址、配对链接粘贴；连接中禁用按钮、显示进度。
 - **配对入口**：粘贴配对链接与扫码都可用。扫码用 `@kit.ScanKit` 的 `scanBarcode.startScanForResult`，系统扫码 UI 自带相机权限，App 不声明 CAMERA（已在本机验证，§16 #5）。
 - **播放页**：全屏视频 + 右侧抽屉（输入开关、键盘、调试信息、断开连接）+ 右侧 14vp 把手；无返回按钮，退出走抽屉「断开连接」。调试浮层默认关闭，打开后显示在**左上角**（不再放左下角）。
-- **持久化**（preferences，键名沿用 Android）：`host`、`port`、`fingerprint`、`device_id`、`transportMode`。配对地址只在 **Wi-Fi 连接成功时**回写，USB/TCP 连接不会冲掉已配对地址。
+- **持久化**（preferences，键名沿用 Android 并新增 UI 项）：`host`、`port`、`fingerprint`、`device_id`、`transportMode`、`debugOn`、`inputOn`。传输模式与手填地址在下次启动恢复；调试信息与输入开关作为用户选择持久化（不再每次配置强制打开），键盘开关刻意不持久化。配对地址只在 **Wi-Fi 连接成功时**回写，USB/TCP 连接不会冲掉已配对地址。
 - **HELLO 设备信息**：屏幕像素宽高、DPI、刷新率、旋转、`deviceInfo.productModel`；每次连接与每次旋转后重建（重连流程）。
 
 ## 11. 开源工程事项
@@ -303,12 +319,12 @@ Android 版的状态散落在 Activity 字段与回调里。鸿蒙版把它抽�
 | 阶段 | 内容 | 退出标准 | 状态（2026-11-17） |
 |---|---|---|---|
 | H1 | 工程骨架、Protocol/Stats、TCP + TLS（含指纹校验）、mDNS、粘贴配对、AVCodec surface 解码上屏、断线重连、设置持久化 | Wi-Fi 连上 Mac 出画面，60fps，统计可见 | 完成（模拟器 + 真实 Helper 验收） |
-| H2 | UDP（native 收包 + NDK AES-GCM + 重组/NACK）+ FEEDBACK | 弱网下自动回退、断电重连、连续 30min 不断流 | 未开始（重连与持久化已在 H1 落地） |
+| H2 | UDP（native 收包 + NDK AES-GCM + 重组/NACK）+ FEEDBACK | 弱网下自动回退、断电重连、连续 30min 不断流 | FEEDBACK 完成；UDP 未实现 |
 | H3 | 输入：触控/手势/键盘/笔 + 服务端门控 + 控制抽屉 | 与 Android 端行为逐项对照通过 | 完成 |
-| H4 | USB AOA 传输接入（native fd + ArkTS 拆帧）+ AUTO 降级 + 热插拔恢复 | 本机 USB 路径 ≤50ms p95，拔插可恢复 | 已实现；真机 USB 五项与 p95 待补测 |
+| H4 | USB AOA 传输接入（native fd + ArkTS 拆帧）+ AUTO 降级 + 热插拔恢复 | 本机 USB 路径 ≤50ms p95，拔插可恢复 | 完成：USB 授权/拒绝/拔插恢复/AUTO 优先/断开停轮询均真机通过；USB p95 20–30ms 常态（偶发关键帧尖峰）。AUTO 支持插线自动回切 USB |
 | H5 | 旋转重配置、开源发布：README、LICENSE、仓库清理、Release 构建说明 | 全新机器按 README 能构建并连上 | 未开始 |
 
-每个阶段结束在 WEB-W00 上真机验收，指标记入 `docs/`。
+每个阶段结束在 WEB-W00 上真机验收，指标记入 `docs/`。Wi-Fi 实测：修复 TLS 1.3 收包停顿后，静止画面 P 帧 e2e 6–42ms；持续画面变化时由 FEEDBACK 驱动 Mac 降码率。
 
 ## 14. 风险
 
@@ -341,3 +357,4 @@ Android 版的状态散落在 Activity 字段与回调里。鸿蒙版把它抽�
 | 5 | 扫码能否在 WEB-W00 + 自动签名下直接调起（是否依赖 AGC 配置） | 真机点击扫码 | 已验证：`@kit.ScanKit` 系统扫码 UI 可直接调起，不依赖 AGC，App 无需 CAMERA |
 | 6 | 旋转时画面恢复的交互 | 前后旋转各 3 次 | 已验证：旋转触发页面重建 → 新 surface + 解码器重开；未实现同连接重发 HELLO |
 | 7 | 其他机型（手机/不同芯片）兼容性 | 社区反馈或自备设备 | 待社区 |
+| 8 | HarmonyOS TLS 1.3 大帧收包停顿 | TLS 1.2 / 1.3 对比实测 | 已验证：1.3 在一个 16KB 记录后停顿数秒；固定 1.2 后 16KB 记录 33ms 内到齐 |

@@ -81,7 +81,6 @@ export default function pairingTest() {
   describe('settings', () => {
     it('persists pairing but starts every launch in AUTO', 0, async () => {
       const kv = new MemoryStore();
-      kv.putString('transportMode', TransportMode.USB);
       const store = new SettingsStore(kv);
       await store.savePairing('192.168.1.9', 7778, FP);
       const loaded = new SettingsStore(kv).load();
@@ -89,6 +88,45 @@ export default function pairingTest() {
       expect(loaded.port).assertEqual(7778);
       expect(loaded.fingerprintHex).assertEqual(FP);
       expect(loaded.transportMode).assertEqual(TransportMode.AUTO);
+    });
+
+    it('restores the last transport mode', 0, async () => {
+      const kv = new MemoryStore();
+      const store = new SettingsStore(kv);
+      await store.saveMode(TransportMode.WIFI);
+      expect(new SettingsStore(kv).load().transportMode).assertEqual(TransportMode.WIFI);
+      await store.saveMode(TransportMode.USB);
+      expect(new SettingsStore(kv).load().transportMode).assertEqual(TransportMode.USB);
+    });
+
+    it('ignores an unknown stored transport mode', 0, () => {
+      const kv = new MemoryStore();
+      kv.putString('transportMode', 'SATELLITE');
+      expect(new SettingsStore(kv).load().transportMode).assertEqual(TransportMode.AUTO);
+    });
+
+    it('persists a manually typed address', 0, async () => {
+      const kv = new MemoryStore();
+      const store = new SettingsStore(kv);
+      await store.saveAddress('10.0.0.7', 7777);
+      const loaded = new SettingsStore(kv).load();
+      expect(loaded.host).assertEqual('10.0.0.7');
+      expect(loaded.port).assertEqual(7777);
+    });
+
+    it('defaults to debug off and input on', 0, () => {
+      const loaded = new SettingsStore(new MemoryStore()).load();
+      expect(loaded.debugOn).assertFalse();
+      expect(loaded.inputOn).assertTrue();
+    });
+
+    it('persists the debug and input toggles', 0, async () => {
+      const kv = new MemoryStore();
+      const store = new SettingsStore(kv);
+      await store.saveUi(true, false);
+      const loaded = new SettingsStore(kv).load();
+      expect(loaded.debugOn).assertTrue();
+      expect(loaded.inputOn).assertFalse();
     });
 
     it('generates a stable 16-byte device id', 0, async () => {

@@ -27,7 +27,9 @@ import {
 const DOMAIN = 0x0200;
 const TAG = 'MirageConnect';
 const USB_WAIT_POLL_MS = 500;
-const USB_WAIT_TIMEOUT_MS = 15000;
+const RECONNECT_WINDOW_MS = 300000;
+const AUTO_RETRY_MS = 5000;
+const USB_WATCH_POLL_MS = 3000;
 
 class UiListener extends SessionListener {
   private stateCb: (model: SessionModel) => void;
@@ -82,6 +84,16 @@ struct ConnectPage {
   private usbWaitTimer: number = -1;
   private usbWaitDeadlineMs: number = 0;
   private usbWanted: boolean = false;
+  // AUTO 走 Wi-Fi/TCP 时盯住配件：插回数据线就切回 USB
+  private usbWatchTimer: number = -1;
+  // 连续切 USB 失败三次就停手，避免 Wi-Fi/USB 反复抖动
+  private usbSwitchFailures: number = 0;
+  // 本轮降级链的起点是否是拔线；降级全部失败后用它决定等待文案
+  private usbDropped: boolean = false;
+  // 等待重连遮罩的截止时刻；0 表示本轮尚未进入等待
+  private waitDeadlineMs: number = 0;
+  // AUTO 降级全部失败后，每隔几秒重试 Wi-Fi/TCP，等 Mac 服务重新启动
+  private retryTimer: number = -1;
   // 已配对/已手填的 Wi-Fi 地址；AUTO 切模式时用它恢复输入框
   private pairedHost: string = '';
   private pairedPort: number = 0;
@@ -100,12 +112,20 @@ struct ConnectPage {
       this.discovery = null;
     }
     this.stopUsbWait();
+    this.stopRetry();
+    this.stopUsbWatch();
   }
 
   onPageShow(): void {
     this.pushed = false;
     if (Runtime.session === null) {
+      // 用户手动断开或等待超时后退回：停止所有自动重连
       this.busy = false;
+      this.stopRetry();
+      this.stopUsbWait();
+      this.stopUsbWatch();
+      this.usbWanted = false;
+      this.waitDeadlineMs = 0;
     }
   }
 
@@ -114,7 +134,10 @@ struct ConnectPage {
       const prefs = await preferences.getPreferences(getContext(this), 'mirage');
       const store = new SettingsStore(new PreferencesKeyValueStore(prefs));
       this.store = store;
+      Runtime.store = store;
       const settings: Settings = store.load();
+      Runtime.debugOn = settings.debugOn;
+      Runtime.inputOn = settings.inputOn;
       this.host = settings.host;
       this.portText = settings.port > 0 ? `${settings.port}` : '';
       this.pairedHost = settings.host;
@@ -170,7 +193,17 @@ struct ConnectPage {
 
   handleState(model: SessionModel): void {
     Runtime.state = model.state;
-    this.status = this.describe(model.state);
+    if (model.state === SessionState.Recovering && this.pushed) {
+      this.notifyWaiting('连接中断，正在重连…');
+    }
+    // 串流页退栈时会对旧会话 stop()，那次 Stopped 会晚于 handleClosed 到达；
+    // 等待重连期间不能被它把提示文案冲成「已断开」
+    if (model.state === SessionState.Stopped &&
+      (this.usbWaitTimer !== -1 || this.retryTimer !== -1)) {
+      hilog.warn(DOMAIN, TAG, 'stopped after close; keeping wait status');
+    } else {
+      this.status = this.describe(model.state);
+    }
     if (model.state === SessionState.Stopped || model.state === SessionState.Idle) {
       this.busy = false;
     }
@@ -178,7 +211,17 @@ struct ConnectPage {
 
   handleConfig(config: SessionConfig): void {
     Runtime.config = config;
+    this.busy = false;
     this.autoStage = 0;
+    this.usbSwitchFailures = 0;
+    this.waitDeadlineMs = 0;
+    this.stopRetry();
+    if (this.mode === TransportMode.AUTO &&
+      (this.lastKind === TransportKind.WIFI || this.lastKind === TransportKind.TCP)) {
+      this.startUsbWatch();
+    } else {
+      this.stopUsbWatch();
+    }
     Runtime.hasConfig = true;
     Runtime.stats.setCodecLabel('HW');
     Runtime.onConfig(config);
@@ -192,32 +235,155 @@ struct ConnectPage {
 
   handleClosed(reason: string): void {
     Runtime.closedReason = reason;
+    hilog.info(DOMAIN, TAG, 'closed: %{public}s mode=%{public}d usbWanted=%{public}s waiting=%{public}s',
+      reason, this.mode, `${this.usbWanted}`, `${this.usbWaitTimer !== -1}`);
     this.status = reason;
     this.busy = false;
-    // AUTO 降级：USB 不通试 Wi-Fi，Wi-Fi 不通试 TCP；TCP 失败就停在连接页
+    this.stopUsbWatch();
+    // 指纹错误是永久错误：重连只会重复失败
+    if (reason.indexOf('证书指纹不匹配') >= 0) {
+      this.stopRetry();
+      this.stopUsbWait();
+      this.usbWanted = false;
+      Runtime.onClosed(reason);
+      return;
+    }
+    // AUTO 降级：USB 不通试 Wi-Fi，Wi-Fi 不通试 TCP
     if (this.mode === TransportMode.AUTO && this.lastKind !== null &&
       this.lastKind !== TransportKind.TCP && this.autoStage < 2) {
       this.autoStage = this.lastKind === TransportKind.USB ? 1 : 2;
+      this.usbDropped = shouldWaitForUsb(reason);
       this.usbWanted = false;
       this.stopUsbWait();
       hilog.info(DOMAIN, TAG, 'auto fallback stage %{public}d after: %{public}s',
         this.autoStage, reason);
-      Runtime.onClosed(reason);
-      // 串流页还在栈顶时，Runtime.onClosed 会把它弹回本页，而它的 aboutToDisappear
-      // 会 stop 当前会话；等出栈落定再建新会话，否则新连接会被那一下 stop 掐掉
+      this.notifyWaiting((this.usbDropped ? 'USB 已断开，' : '连接中断，') +
+        (this.autoStage === 1 ? '正在尝试 Wi-Fi…' : '正在尝试 TCP…'));
+      // 串流页会保持显示（遮罩），这里只建新会话；等它出配置后页面自己清遮罩
       setTimeout(() => {
         this.connect(true);
       }, 50);
       return;
     }
+    // AUTO 的通道都试完了：回到等待 USB 重插 + 周期重试
+    if (this.mode === TransportMode.AUTO) {
+      const cable = this.usbDropped || shouldWaitForUsb(reason);
+      this.usbWanted = true;
+      this.autoStage = 0;
+      this.usbDropped = false;
+      hilog.info(DOMAIN, TAG, 'auto exhausted; waiting for USB after: %{public}s', reason);
+      this.startUsbWait(cable ? 'USB 已断开，请重新插入' : '');
+      this.notifyWaiting(cable ? 'USB 已断开，等待重新插入…' : '连接中断，等待 USB 重连…');
+      this.startRetry();
+      return;
+    }
+    // USB 模式：拔线与主机失联都走同一套等待 + 周期重试
     if (this.usbWanted && shouldWaitForUsb(reason)) {
-      this.startUsbWait();
-    } else if (this.usbWanted && reason.indexOf('USB 权限') < 0 && reason.indexOf('USB 授权') < 0) {
-      // Mac 侧退出后设备留在 AOA，重启 Mac App 也找不到它，只有拔插能恢复
-      this.status = 'Mac 已断开，请拔插数据线后重连';
+      const message = reason === 'USB 已断开' ? 'USB 已断开，请重新插入' : '';
+      this.startUsbWait(message);
+      this.notifyWaiting(message.length > 0 ? 'USB 已断开，等待重新插入…' : '正在等待 USB 重连…');
+      this.startRetry();
+      return;
+    }
+    if (this.usbWanted && reason.indexOf('USB 权限') < 0 && reason.indexOf('USB 授权') < 0) {
+      // Mac 侧退出（连接无响应等）：周期重试，服务恢复后自动连回
+      this.notifyWaiting('Mac 已断开，正在重连…');
+      this.startRetry();
+      return;
+    }
+    // Wi-Fi / TCP 模式
+    if (this.mode === TransportMode.WIFI || this.mode === TransportMode.TCP) {
+      this.notifyWaiting(this.mode === TransportMode.WIFI ? 'Wi-Fi 已断开，正在重连…' : '连接已断开，正在重连…');
+      this.startRetry();
+      return;
     }
     // 串流页在栈顶，由它弹回本页；这里只负责最终状态
     Runtime.onClosed(reason);
+  }
+
+  private startRetry(): void {
+    if (this.retryTimer !== -1) {
+      return;
+    }
+    if (this.waitDeadlineMs === 0) {
+      this.waitDeadlineMs = Date.now() + RECONNECT_WINDOW_MS;
+    }
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = -1;
+      if (Date.now() > this.waitDeadlineMs) {
+        return;
+      }
+      if (this.busy) {
+        this.startRetry();
+        return;
+      }
+      // AUTO 下重试从 USB 优先开始：数据线可用时切回低延迟通道
+      this.connect(true);
+    }, AUTO_RETRY_MS);
+  }
+
+  private stopRetry(): void {
+    if (this.retryTimer !== -1) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = -1;
+    }
+  }
+
+  // AUTO 走 Wi-Fi/TCP 时盯住配件；配件在就切回 USB（AOA 模式下配件可能一直存在，
+// 不能只等「消失再出现」）
+  private startUsbWatch(): void {
+    if (this.usbWatchTimer !== -1 || this.mode !== TransportMode.AUTO) {
+      return;
+    }
+    this.usbWatchTimer = setInterval(() => {
+      if (this.mode !== TransportMode.AUTO || this.busy) {
+        return;
+      }
+      if (!hasUsbAccessory(new SystemUsbPort())) {
+        this.usbSwitchFailures = 0;
+        return;
+      }
+      if (this.usbSwitchFailures >= 3) {
+        return;
+      }
+      this.switchToUsb();
+    }, USB_WATCH_POLL_MS);
+  }
+
+  private stopUsbWatch(): void {
+    if (this.usbWatchTimer !== -1) {
+      clearInterval(this.usbWatchTimer);
+      this.usbWatchTimer = -1;
+    }
+  }
+
+  private switchToUsb(): void {
+    this.stopUsbWatch();
+    this.usbSwitchFailures += 1;
+    hilog.info(DOMAIN, TAG, 'accessory available; switching to USB');
+    this.notifyWaiting('已插回 USB，正在切换…');
+    const session = Runtime.session;
+    if (session !== null) {
+      session.stop();
+    }
+    Runtime.session = null;
+    this.autoStage = 0;
+    this.usbDropped = false;
+    // 等服务端彻底释放旧连接（helper 只接受一个客户端）再开新会话
+    setTimeout(() => {
+      this.connect();
+    }, 300);
+  }
+
+  private notifyWaiting(message: string): void {
+    // 不在播放页就没有遮罩可显示，状态文案已经在连接页上
+    if (!this.pushed) {
+      return;
+    }
+    if (this.waitDeadlineMs === 0) {
+      this.waitDeadlineMs = Date.now() + RECONNECT_WINDOW_MS;
+    }
+    Runtime.onWaiting(message, this.waitDeadlineMs);
   }
 
   private applyPairing(): void {
@@ -297,9 +463,19 @@ struct ConnectPage {
 
   private selectMode(mode: TransportMode): void {
     this.usbWanted = false;
+    this.usbDropped = false;
+    this.waitDeadlineMs = 0;
+    this.stopRetry();
     this.stopUsbWait();
+    this.stopUsbWatch();
     this.autoStage = 0;
     this.mode = mode;
+    const store = this.store;
+    if (store !== null) {
+      store.saveMode(mode).catch((err: Error) => {
+        hilog.warn(DOMAIN, TAG, 'save mode failed: %{public}s', err.message);
+      });
+    }
     if (mode === TransportMode.WIFI) {
       this.portText = '7778';
     } else if (mode === TransportMode.TCP) {
@@ -317,6 +493,8 @@ struct ConnectPage {
     }
     if (!fromFallback) {
       this.autoStage = 0;
+      this.usbDropped = false;
+      this.stopRetry();
     }
     this.stopUsbWait();
     const host = this.host.trim();
@@ -337,7 +515,8 @@ struct ConnectPage {
       return;
     }
     // AUTO 且没有 USB 配件、也没有已配置地址时，先发现一次 Wi-Fi，找不到再回退 TCP
-    if (auto && this.autoStage === 0 && choice.kind === TransportKind.TCP && !this.autoDiscoveryTried) {
+    if (auto && this.autoStage === 0 && choice.kind === TransportKind.TCP &&
+      !this.autoDiscoveryTried && !fromFallback) {
       this.autoDiscoveryTried = true;
       this.discover(true);
       return;
@@ -388,6 +567,11 @@ struct ConnectPage {
     Runtime.session = session;
 
     const store = this.store;
+    if (store !== null && !fromFallback && host.length > 0 && Number.isFinite(port) && port > 0) {
+      store.saveAddress(host, port).catch((err: Error) => {
+        hilog.warn(DOMAIN, TAG, 'save address failed: %{public}s', err.message);
+      });
+    }
     if (store !== null && choice.kind === TransportKind.WIFI) {
       this.pairedHost = host;
       this.pairedPort = choice.port;
@@ -400,7 +584,11 @@ struct ConnectPage {
 
   private disconnect(): void {
     this.usbWanted = false;
+    this.usbDropped = false;
+    this.waitDeadlineMs = 0;
+    this.stopRetry();
     this.stopUsbWait();
+    this.stopUsbWatch();
     this.autoStage = 0;
     this.lastKind = null;
     const session = Runtime.session;
@@ -413,31 +601,43 @@ struct ConnectPage {
     this.status = '已断开';
   }
 
-  private startUsbWait(): void {
+  private startUsbWait(message: string = ''): void {
     if (this.usbWaitTimer !== -1) {
       return;
     }
     const now = Date.now();
     if (now >= this.usbWaitDeadlineMs) {
-      this.usbWaitDeadlineMs = now + USB_WAIT_TIMEOUT_MS;
+      this.usbWaitDeadlineMs = now + RECONNECT_WINDOW_MS;
     }
-    // 配件已经在（AOA 里主机没起来）时反复 open/close 会把 USB 服务拖死，界面跟着卡住；
-    // 这种只有用户手动点连接靠谱。配件真的不在（等插线）才自动连。
-    const autoConnect = !hasUsbAccessory(new SystemUsbPort());
-    this.status = autoConnect ? '等待 USB 连接…' : '正在等待 USB 恢复…';
+    // 配件一直在（AOA 里主机没起来）时反复 open/close 会把 USB 服务拖死，界面跟着卡住；
+    // 这种只有用户手动点连接靠谱。必须看到配件先消失再出现，才认为是一次重新插线。
+    let sawAbsent = !hasUsbAccessory(new SystemUsbPort());
+    hilog.info(DOMAIN, TAG, 'usb wait armed: absent=%{public}s message=%{public}s',
+      `${sawAbsent}`, message);
+    this.status = sawAbsent
+      ? (message.length > 0 ? message : '等待 USB 连接…')
+      : '正在等待 USB 恢复…';
     this.usbWaitTimer = setInterval(() => {
       if (Date.now() > this.usbWaitDeadlineMs) {
         this.stopUsbWait();
-        this.status = autoConnect ? '未检测到 USB 设备' : 'Mac 未响应，请确认 Mac 端 USB 已开启后重试';
+        this.status = sawAbsent ? '未检测到 USB 设备' : 'Mac 未响应，请确认 Mac 端 USB 已开启后重试';
         return;
       }
-      if (!autoConnect || this.busy) {
+      if (this.busy) {
         return;
       }
       const present = hasUsbAccessory(new SystemUsbPort());
       if (!present) {
+        if (!sawAbsent) {
+          sawAbsent = true;
+          hilog.info(DOMAIN, TAG, 'usb absent; watching for replug');
+        }
         return;
       }
+      if (!sawAbsent) {
+        return;
+      }
+      hilog.info(DOMAIN, TAG, 'usb present after replug; reconnecting');
       this.stopUsbWait();
       this.connect();
     }, USB_WAIT_POLL_MS);

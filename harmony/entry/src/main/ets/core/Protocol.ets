@@ -291,3 +291,22 @@ export function decodePing(payload: Uint8Array): number {
   const view = new DataView(payload.buffer, payload.byteOffset, payload.length);
   return view.getUint32(0) * 4294967296 + view.getUint32(4);
 }
+
+export function encodeFeedback(fpsX10: number, decodeMS: number, dropped: number, queueDepth: number,
+  rttMS: number, lossPermille: number, recvBitrateBps: number, arrivalDelayMS: number,
+  timestampMicros: number): Uint8Array {
+  const payload = new Uint8Array(28);
+  const view = new DataView(payload.buffer);
+  view.setUint16(0, fpsX10);
+  view.setUint16(2, decodeMS);
+  view.setUint16(4, dropped);
+  view.setUint16(6, queueDepth);
+  view.setUint16(8, rttMS);
+  view.setUint16(10, lossPermille);
+  view.setUint32(12, recvBitrateBps);
+  view.setUint32(16, arrivalDelayMS);
+  const hi = Math.floor(timestampMicros / 4294967296);
+  view.setUint32(20, hi);
+  view.setUint32(24, timestampMicros - hi * 4294967296);
+  return encodeFrame(MessageType.FEEDBACK, payload);
+}

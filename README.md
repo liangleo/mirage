@@ -66,7 +66,7 @@ swift run mirage-helper --mode extend --width 1280 --height 800
 ### 黑屏排查
 
 - 确认只有一个 helper 在跑：`lsof -ti tcp:7777`；有多个或旧进程时先 `pkill -x mirage-helper` 再重启。
-- 如果 App 显示「副屏」但手机看到的是主屏，通常是另一个 helper 已经占着 7777/虚拟屏；在菜单栏或主窗口关闭「启动/停止服务」后再打开。App 会自动识别并接管已在运行的 helper，开关会显示为开启。
+- 如果 App 显示「副屏」但手机看到的是主屏，通常是另一个 helper 已经占着 7777/虚拟屏；在菜单栏或主窗口关闭「服务」后再打开。App 会自动识别并接管已在运行的 helper，开关会显示为开启。
 - 重新编译后必须重启 helper，旧进程仍在用旧逻辑。
 - 确认 `adb reverse tcp:7777 tcp:7777` 仍在，App 里地址是 `127.0.0.1:7777`。
 - 仍黑屏时看 App 日志：`adb logcat -s Mirage`，正常应出现 `first keyframe`、`configure`、`first output`。
@@ -82,11 +82,9 @@ open build/.Mirage.app
 
 菜单栏会出现显示器图标。App 启动后默认**只留在菜单栏**，不弹出主窗口；点菜单里的「打开主界面」打开独立操作窗口。主窗口可以：
 
-- **启动/停止服务** 开关（停止会结束已有的 helper 进程，包括在终端里手动启动的那个）
+- **服务** 开关：开启即拉起 helper，同时提供 USB（AOA 桥）与 Wi-Fi（TLS 7778 + mDNS）两条通道；关闭会结束已有的 helper 进程（包括在终端里手动启动的那个）并停掉 AOA 桥
 - **启动 App 后自动启动服务** 开关：开启后，App 启动即启动 helper 并等待客户端连接（默认关闭）
-- **USB 免调试连接（AOA）** 开关：通过 Android Open Accessory 直接走 USB，不需要 adb；开关会持久化，App 启动/服务启动后自动尝试连接，并在 USB 拔出/桥接退出后自动重试等待设备。手机首次连接会弹出授权，勾选「连接后一律打开 Mirage」即可自动拉起
-- **Wi-Fi 连接（局域网）** 开关：helper 绑定 `0.0.0.0:7777` 并通过 mDNS 广播 `_mirage._tcp`；手机与 Mac 需在同一局域网。当前为明文 TCP（UDP/TLS 见后续里程碑）
-- **登录时自动启动 Mirage** 开关：使用 `SMAppService` 注册登录项，适合配合上面的 USB 模式做插线即用
+- **登录时自动启动 Mirage** 开关：使用 `SMAppService` 注册登录项，适合配合 USB 模式做插线即用
 - **副屏（虚拟显示器）** / **镜像主屏**：切换模式（会重启 helper；从副屏切回镜像时虚拟屏随旧进程退出消失）
 - **分辨率**：默认 **自动（匹配设备）**；也可选 960×600 / 1280×720 / 1280×800 / 1600×1000 / 1920×1080（4K）/ 1920×1200（HiDPI 2x 编码）。自动模式下 helper 收到设备 HELLO 后按设备像素重建虚拟屏，App 会自动重连一次
 - **旋转**：设备旋转后 App 自动重连并上报新尺寸，helper 重建对应方向的虚拟屏
@@ -101,16 +99,16 @@ App 启动时默认是**副屏模式**，且默认不会自动启动服务；可
 ### USB 免调试连接（AOA）
 
 1. `brew install libusb`，重新执行 `make app`。
-2. 在 Mac 主界面打开「USB 免调试连接（AOA）」，或 `open build/.Mirage.app --args --usb`。
+2. 开启服务（USB 与 Wi-Fi 同时可用），或 `open build/.Mirage.app --args --usb` 启动并直接建立 AOA 连接。
 3. 手机首次会弹出 USB 授权，勾选「连接后一律打开 Mirage」并确定；之后插入 USB 会自动打开 App。
 4. 手机状态栏/调试浮层显示「已连接 USB」即表示走的是 accessory 通道；此时不需要 `adb reverse`。
-5. 需要开机/登录后自动可用：再打开「登录时自动启动 Mirage」。USB 开关会持久化，App 启动后自动拉起 helper 并循环等待设备。登录项建议先把 App 安装到 `/Applications`（`make install.mac`）再开启。
+5. 需要开机/登录后自动可用：打开「登录时自动启动 Mirage」。通道默认常开，服务启动后自动拉起 helper、AOA 桥会常驻等待设备（没插线启动也没关系，插上即可）。登录项建议先把 App 安装到 `/Applications`（`make install.mac`）再开启。
 
 ### Wi-Fi 局域网连接
 
-1. Mac 主界面打开「Wi-Fi 连接（局域网）」，helper 会监听 `0.0.0.0:7777` 并广播 `_mirage._tcp`。
-2. 手机与 Mac 连接同一 Wi-Fi；App 的「连接设置」里点「发现 Mac」可自动填入地址和端口，也可手动输入 Mac 的局域网 IP。
-3. 当前 Wi-Fi 路径使用明文 TCP，适合可信局域网；UDP 视频、NACK、TLS 和二维码配对在 M4 后续阶段实现。
+1. 开启服务后 helper 会监听 `0.0.0.0:7778`（TLS）并通过 mDNS 广播 `_mirage._tcp`；`127.0.0.1:7777` 明文仅给 AOA 桥使用。
+2. 手机与 Mac 连接同一 Wi-Fi；App 里点「发现 Mac」可自动发现，或用 Mac 主界面的二维码扫码配对（TLS 指纹固定，防中间人）。
+3. 客户端固定使用 TLS 1.2：HarmonyOS 的 TLS 1.3 收包路径在 16KB 记录后会停顿数秒，导致大帧卡顿。
 4. 5GHz/同网环境实测 2800×1260@60 约 55 fps、decode 17 ms、e2e 25 ms、RTT 17 ms。
 
 AOA 会占用手机的 accessory 功能（adb 可能仍可用，取决于 ROM）。正常停止服务/桥接时，桥接会先发送 SIGTERM 并把 USB 设备 reset 回普通模式（实测 vivo 恢复为 `charging,adb`）；个别不支持 reset 的 ROM 才需要拔插一次。helper 因自动分辨率重启时，`mirage-aoa` 会自动重连并重放 HELLO，Android 端无需操作。
