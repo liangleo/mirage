@@ -379,9 +379,22 @@ int main(int argc, char **argv) {
     }
 
     int version = 0;
-    libusb_device *device = find_aoa_device(&version);
+    libusb_device *device = NULL;
+    // 服务开启时线可能没插：常驻等设备，插上后自动切 AOA。
+    // 之前直接退出会让「插回数据线」永远等不到配件。
+    int announced = 0;
+    while (!stopping) {
+        device = find_aoa_device(&version);
+        if (device != NULL) {
+            break;
+        }
+        if (!announced) {
+            fprintf(stderr, "waiting for AOA device\n");
+            announced = 1;
+        }
+        usleep(500000);
+    }
     if (device == NULL) {
-        fprintf(stderr, "no AOA device found\n");
         libusb_exit(usb_ctx);
         return 1;
     }

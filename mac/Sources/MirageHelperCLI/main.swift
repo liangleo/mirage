@@ -139,6 +139,7 @@ if arguments.contains("--list-displays") {
     let pointHeight = argumentValue("--height").flatMap { Int($0) } ?? 800
     let autoSize = arguments.contains("--auto-size")
     let wifi = arguments.contains("--wifi")
+    let controlPort = argumentValue("--control-port").flatMap { UInt16($0) }
     let position = DisplayPosition(rawValue: argumentValue("--position") ?? "right") ?? .right
     let dumpFramePath = argumentValue("--dump-frame")
     let recordPath = argumentValue("--record")
@@ -156,6 +157,7 @@ if arguments.contains("--list-displays") {
         autoSize: autoSize,
         position: position,
         wifi: wifi,
+        controlPort: controlPort,
         dumpFramePath: dumpFramePath,
         recordPath: recordPath
     )

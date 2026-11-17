@@ -53,6 +53,7 @@ public final class MirageServer: @unchecked Sendable {
     private var keepalive: DispatchSourceTimer?
     private var udpSender: UdpVideoSender?
     private var udpPeerReady = false
+    private let wifiToggleLock = NSLock()
     private var lastFeedbackMicros: UInt64 = 0
     private var clientDeviceID: Data?
     private var inputDisabledSent = false
@@ -61,6 +62,7 @@ public final class MirageServer: @unchecked Sendable {
     private var inputRate = InputRateLimiter()
     private var inputWasPaused = false
     public private(set) var udpConfig: UdpConfig?
+    private var wifiOn = false
 
     public var tlsPort: UInt16 { port + 1 }
 
@@ -90,44 +92,9 @@ public final class MirageServer: @unchecked Sendable {
         listener = try startListener(parameters: plainParameters, on: nwPort, serviceName: nil, txtRecord: Data())
 
         if let tlsIdentity {
-            guard let tlsPortValue = NWEndpoint.Port(rawValue: tlsPort),
-                  let secIdentity = sec_identity_create(tlsIdentity) else {
-                throw ServerError.tlsUnavailable
-            }
-            let tlsOptions = NWProtocolTLS.Options()
-            sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, secIdentity)
-            sec_protocol_options_set_min_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv12)
-            let tlsParameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
-            tlsParameters.allowLocalEndpointReuse = true
-            tlsListener = try startListener(
-                parameters: tlsParameters,
-                on: tlsPortValue,
-                serviceName: serviceName,
-                txtRecord: pairingTXTRecord(),
-                secure: true
-            )
+            try enableWifi(identity: tlsIdentity, serviceName: serviceName ?? "Mirage")
         } else if serviceName != nil {
             onLog?("warning: mDNS advertised without TLS")
-        }
-
-        if tlsIdentity != nil {
-            let key = randomData(count: 32)
-            let noncePrefix = randomData(count: 4)
-            let config = UdpConfig(
-                port: tlsPort,
-                cipher: .aes256GCM,
-                key: key,
-                noncePrefix: noncePrefix,
-                flags: 1
-            )
-            udpConfig = config
-            let sender = UdpVideoSender(port: tlsPort, key: key, noncePrefix: noncePrefix)
-            sender.onLog = onLog
-            sender.onPeerReady = { [weak self] in
-                self?.udpPeerReady = true
-            }
-            try sender.start()
-            udpSender = sender
         }
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -137,6 +104,99 @@ public final class MirageServer: @unchecked Sendable {
         }
         timer.resume()
         keepalive = timer
+    }
+
+    public var wifiEnabled: Bool {
+        queue.sync { wifiOn }
+    }
+
+    /// Start the TLS listener, mDNS advertisement and UDP sender on demand.
+    /// Driven by the control channel so toggling Wi-Fi never restarts capture,
+    /// the virtual display, or an active AOA session.
+    public func enableWifi(identity: SecIdentity, serviceName: String) throws {
+        wifiToggleLock.lock()
+        defer { wifiToggleLock.unlock() }
+        if wifiEnabled {
+            return
+        }
+        guard let tlsPortValue = NWEndpoint.Port(rawValue: tlsPort),
+              let secIdentity = sec_identity_create(identity) else {
+            throw ServerError.tlsUnavailable
+        }
+        let tlsOptions = NWProtocolTLS.Options()
+        sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, secIdentity)
+        sec_protocol_options_set_min_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv12)
+        let tlsParameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+        tlsParameters.allowLocalEndpointReuse = true
+        let listener = try startListener(
+            parameters: tlsParameters,
+            on: tlsPortValue,
+            serviceName: serviceName,
+            txtRecord: pairingTXTRecord(identity: identity),
+            secure: true
+        )
+
+        let key = randomData(count: 32)
+        let noncePrefix = randomData(count: 4)
+        let config = UdpConfig(
+            port: tlsPort,
+            cipher: .aes256GCM,
+            key: key,
+            noncePrefix: noncePrefix,
+            flags: 1
+        )
+        let sender = UdpVideoSender(port: tlsPort, key: key, noncePrefix: noncePrefix)
+        sender.onLog = onLog
+        sender.onPeerReady = { [weak self] in
+            guard let server = self else { return }
+            server.queue.async {
+                server.udpPeerReady = true
+            }
+        }
+        do {
+            try sender.start()
+        } catch {
+            listener.cancel()
+            throw error
+        }
+
+        queue.sync {
+            tlsListener = listener
+            udpSender = sender
+            udpConfig = config
+            udpPeerReady = false
+            wifiOn = true
+        }
+        onLog?("wifi enabled port=\(tlsPort)")
+    }
+
+    public func disableWifi() {
+        wifiToggleLock.lock()
+        defer { wifiToggleLock.unlock() }
+        var listener: NWListener?
+        var sender: UdpVideoSender?
+        var secure: NWConnection?
+        queue.sync {
+            guard wifiOn else { return }
+            listener = tlsListener
+            tlsListener = nil
+            sender = udpSender
+            udpSender = nil
+            udpConfig = nil
+            udpPeerReady = false
+            wifiOn = false
+            if connectionSecure {
+                secure = connection
+                connection = nil
+                connectionSecure = false
+            }
+        }
+        listener?.cancel()
+        sender?.stop()
+        secure?.cancel()
+        if listener != nil {
+            onLog?("wifi disabled")
+        }
     }
 
     private func startListener(
@@ -229,10 +289,10 @@ public final class MirageServer: @unchecked Sendable {
         }
     }
 
-    private func pairingTXTRecord() -> Data {
-        guard let tlsIdentity else { return Data() }
+    private func pairingTXTRecord(identity: SecIdentity?) -> Data {
+        guard let identity else { return Data() }
         var certificate: SecCertificate?
-        guard SecIdentityCopyCertificate(tlsIdentity, &certificate) == errSecSuccess,
+        guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess,
               let certificate else {
             return Data()
         }

@@ -61,7 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if arguments.contains("--usb") {
-            HelperController.shared.setUsbBridge(true)
+            HelperController.shared.startUsbBridge()
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -95,14 +95,8 @@ struct StatusMenu: View {
 
     var body: some View {
         Text(controller.status)
-        Button(controller.isRunning ? "停止服务" : "启动服务") {
+        Button(controller.isRunning ? "关闭服务" : "开启服务") {
             controller.toggle()
-        }
-        Button(controller.usbEnabled ? "停止 USB 连接" : "USB 连接（AOA）") {
-            controller.setUsbBridge(!controller.usbEnabled)
-        }
-        Button(controller.wifiEnabled ? "关闭 Wi-Fi 连接" : "Wi-Fi 连接（局域网）") {
-            controller.setWifiEnabled(!controller.wifiEnabled)
         }
         Divider()
         Button {
@@ -176,7 +170,7 @@ struct MainView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("启动/停止服务", isOn: Binding(
+                Toggle("服务", isOn: Binding(
                     get: { controller.isRunning },
                     set: { enabled in
                         if enabled {
@@ -194,17 +188,9 @@ struct MainView: View {
                 ))
                 .toggleStyle(.switch)
 
-                Toggle("USB 免调试连接（AOA）", isOn: Binding(
-                    get: { controller.usbEnabled },
-                    set: { controller.setUsbBridge($0) }
-                ))
-                .toggleStyle(.switch)
-
-                Toggle("Wi-Fi 连接（局域网）", isOn: Binding(
-                    get: { controller.wifiEnabled },
-                    set: { controller.setWifiEnabled($0) }
-                ))
-                .toggleStyle(.switch)
+                Text("服务开启后，同时提供 USB（AOA）与 Wi-Fi（局域网）连接")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Toggle("登录时自动启动 Mirage", isOn: Binding(
                     get: { controller.launchAtLogin },
@@ -284,7 +270,7 @@ struct MainView: View {
                 .padding(8)
             }
 
-            if controller.wifiEnabled {
+            if controller.isRunning {
                 GroupBox("扫码配对（Wi-Fi）") {
                     if let pairing = controller.pairing {
                         HStack(alignment: .top, spacing: 12) {
@@ -312,7 +298,7 @@ struct MainView: View {
                         }
                         .padding(6)
                     } else {
-                        Text("启动 Wi-Fi 服务后显示二维码")
+                        Text("开启 Wi-Fi 连接后显示二维码")
                             .foregroundStyle(.secondary)
                             .padding(6)
                     }
@@ -489,8 +475,6 @@ final class HelperController: ObservableObject {
     @Published private(set) var position: DisplayPosition
     @Published private(set) var fps: Int
     @Published private(set) var autoStartOnLaunch: Bool
-    @Published private(set) var usbEnabled: Bool
-    @Published private(set) var wifiEnabled: Bool
     @Published private(set) var launchAtLogin: Bool
     @Published private(set) var isRunning = false
     @Published private(set) var usbBridgeRunning = false
@@ -509,6 +493,7 @@ final class HelperController: ObservableObject {
     private var bridgeRestarts = 0
     private var monitorTimer: Timer?
     private var instanceLockFD: Int32 = -1
+    private let controlPort: UInt16 = 7779
     private lazy var tlsIdentity = try? TLSIdentity.loadOrCreate()
 
     private init() {
@@ -535,10 +520,6 @@ final class HelperController: ObservableObject {
         let savedFPS = UserDefaults.standard.integer(forKey: "fps")
         fps = Self.frameRates.contains(savedFPS) ? savedFPS : 60
         autoStartOnLaunch = UserDefaults.standard.bool(forKey: "autoStartOnLaunch")
-        // 服务不随 App 启动自动开启：之前的选择只影响本次运行，重启后一律显示"关闭"，
-        // 否则菜单上的"停止 USB 连接"会让人以为服务已经在跑。
-        usbEnabled = false
-        wifiEnabled = false
         launchAtLogin = SMAppService.mainApp.status == .enabled
 
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
@@ -700,60 +681,52 @@ final class HelperController: ObservableObject {
         }
     }
 
-    func setUsbBridge(_ enabled: Bool) {
-        guard enabled != usbEnabled else { return }
-        let wasWifi = wifiEnabled
-        let action = HelperLifecycle.actionOnUsbChange(
-            enabled: enabled,
-            wasWifi: wasWifi,
-            running: isRunning
-        )
-        usbEnabled = enabled
-        if enabled {
-            wifiEnabled = false
+    /// 服务开启后总是启用 Wi-Fi（USB 由 AOA 桥负责），控制通道不重启捕获。
+    private func applyWifiState(attempts: Int = 25) {
+        if let reply = sendControl("wifi on") {
+            if reply.hasPrefix("err") {
+                status = "Wi-Fi 启用失败：\(reply)"
+            } else {
+                status = "运行中 · \(mode.title) · \(fps)fps · USB + Wi-Fi"
+            }
+            return
         }
-        apply(action)
-        if enabled {
-            startUsbBridge()
-        } else {
-            stopUsbBridge()
-            status = "USB 连接已关闭 · 如手机仍在 accessory 模式请拔插 USB"
+        guard attempts > 0 else {
+            status = "Wi-Fi 启用失败：控制端口未响应"
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.applyWifiState(attempts: attempts - 1)
         }
     }
 
-    func setWifiEnabled(_ enabled: Bool) {
-        guard enabled != wifiEnabled else { return }
-        let wasUsb = usbEnabled
-        let action = HelperLifecycle.actionOnWifiChange(
-            enabled: enabled,
-            usbEnabled: usbEnabled,
-            running: isRunning
-        )
-        wifiEnabled = enabled
-        if enabled && wasUsb {
-            usbEnabled = false
-            stopUsbBridge()
+    private func sendControl(_ command: String) -> String? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var timeout = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = controlPort.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
+                connect(fd, address, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
         }
-        apply(action)
-        if action == .stop {
-            status = "已停止 · Wi-Fi 连接已关闭"
-        }
+        guard connected == 0 else { return nil }
+        let line = command + "\n"
+        _ = line.withCString { write(fd, $0, strlen($0)) }
+        var buffer = [UInt8](repeating: 0, count: 128)
+        let count = read(fd, &buffer, buffer.count)
+        guard count > 0 else { return nil }
+        return String(bytes: buffer[0..<count], encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func apply(_ action: HelperAction) {
-        switch action {
-        case .none:
-            break
-        case .start:
-            start()
-        case .restart:
-            restart()
-        case .stop:
-            shutdown()
-        }
-    }
-
-    private func startUsbBridge() {
+    func startUsbBridge() {
         guard bridgeProcess == nil else { return }
         if !isRunning {
             start()
@@ -805,10 +778,10 @@ final class HelperController: ObservableObject {
                 self.bridgeStartedAt = nil
                 self.bridgeRestarts = lived > 20 ? 1 : self.bridgeRestarts + 1
                 let delay = min(5.0, 0.5 * Double(self.bridgeRestarts))
-                if self.usbEnabled && self.isRunning {
+                if self.isRunning {
                     self.status = "USB 已启用，等待设备…"
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                        guard let self, self.usbEnabled, self.isRunning,
+                        guard let self, self.isRunning,
                               self.bridgeProcess == nil else { return }
                         self.startUsbBridge()
                     }
@@ -876,6 +849,7 @@ final class HelperController: ObservableObject {
             externalHelperPID = pid
             isRunning = true
             status = "运行中（已有 helper）"
+            applyWifiState()
             return
         }
 
@@ -886,10 +860,8 @@ final class HelperController: ObservableObject {
 
         let child = Process()
         child.executableURL = helper
-        var arguments = ["--mode", mode.rawValue, "--port", "7777", "--fps", "\(fps)"]
-        if wifiEnabled {
-            arguments.append("--wifi")
-        }
+        var arguments = ["--mode", mode.rawValue, "--port", "7777", "--fps", "\(fps)",
+                         "--control-port", "\(controlPort)"]
         if mode == .extend {
             if resolution.isAuto {
                 arguments += ["--auto-size"]
@@ -910,6 +882,8 @@ final class HelperController: ObservableObject {
                 guard let self, self.process === ended else { return }
                 self.process = nil
                 self.isRunning = false
+                // helper 已退出（例如系统停止共享）：桥继续重试只会占着设备
+                self.stopUsbBridge()
                 // 4 = mirage-helper 没有屏幕录制权限（见 HelperAppCLI main.swift）
                 if ended.terminationStatus == 4 {
                     self.status = "需要屏幕录制权限：系统设置 → 隐私与安全性 → 屏幕录制，勾选 mirage-helper 后重启服务"
@@ -935,7 +909,9 @@ final class HelperController: ObservableObject {
 
         status = "运行中 · \(mode.title) · \(fps)fps"
 
-        if usbEnabled && bridgeProcess == nil {
+        // 服务开启 = 同时提供 Wi-Fi 与 USB
+        applyWifiState()
+        if bridgeProcess == nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.startUsbBridge()
             }
@@ -943,10 +919,10 @@ final class HelperController: ObservableObject {
     }
 
     func stop() {
-        usbEnabled = false
+        // 保留 USB/Wi-Fi 的开启意图：再次开启服务时自动恢复，客户端才能自己重连
         stopUsbBridge()
         stopHelperOnly()
-        status = "已停止 · USB 连接已关闭"
+        status = "已停止"
     }
 
     func shutdown() {
@@ -979,24 +955,15 @@ final class HelperController: ObservableObject {
     }
 
     private func restart() {
-        if usbEnabled {
-            stopHelperOnly()
-            status = "重启服务…"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.start()
-            }
-        } else {
-            stopHelperOnly()
-            stopUsbBridge()
-            status = "重启服务…"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.start()
-            }
+        stopHelperOnly()
+        status = "重启服务…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.start()
         }
     }
 
     private func refreshPairing() {
-        guard wifiEnabled, let identity = tlsIdentity, let host = primaryIPv4Address() else {
+        guard let identity = tlsIdentity, let host = primaryIPv4Address() else {
             pairing = nil
             return
         }

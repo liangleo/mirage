@@ -9,8 +9,12 @@ public enum CaptureError: Error {
     case invalidDisplayMode(CGDirectDisplayID)
 }
 
-public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable {
+public final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     public typealias FrameHandler = (CVPixelBuffer, UInt64) -> Void
+
+    /// Fired when the system stops the stream (e.g. the menu bar's "stop
+    /// sharing"); the helper has nothing left to serve and should exit.
+    public var onStop: (@Sendable () -> Void)?
 
     private let displayID: CGDirectDisplayID
     private let fps: Int
@@ -58,7 +62,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.showsCursor = true
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "app.mirage.capture"))
         try await stream.startCapture()
         self.stream = stream
@@ -69,6 +73,12 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
             try await stream.stopCapture()
         }
         stream = nil
+    }
+
+    public func stream(_ stream: SCStream, didStopWithError error: Error) {
+        print("capture stopped: \(error)")
+        fflush(stdout)
+        onStop?()
     }
 
     public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {

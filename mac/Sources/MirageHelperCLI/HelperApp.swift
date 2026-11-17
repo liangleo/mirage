@@ -31,6 +31,7 @@ public final class HelperApp: @unchecked Sendable {
     private let autoSize: Bool
     private let position: DisplayPosition
     private let wifi: Bool
+    private let controlPort: UInt16?
     private let dumpFramePath: String?
     private var dumpedFrame = false
     private let recordPath: String?
@@ -44,6 +45,7 @@ public final class HelperApp: @unchecked Sendable {
     private var encoder: VideoEncoder?
     private var capture: DisplayCapture?
     private var server: MirageServer?
+    private var controlServer: ControlServer?
     private var injector: InputInjector?
 
     public init(
@@ -59,6 +61,7 @@ public final class HelperApp: @unchecked Sendable {
         autoSize: Bool = false,
         position: DisplayPosition = .right,
         wifi: Bool = false,
+        controlPort: UInt16? = nil,
         dumpFramePath: String? = nil,
         recordPath: String? = nil
     ) {
@@ -74,6 +77,7 @@ public final class HelperApp: @unchecked Sendable {
         self.autoSize = autoSize
         self.position = position
         self.wifi = wifi
+        self.controlPort = controlPort
         self.dumpFramePath = dumpFramePath
         self.recordPath = recordPath
     }
@@ -176,12 +180,56 @@ public final class HelperApp: @unchecked Sendable {
             }
         }
         self.capture = capture
+        // 系统停止共享（菜单栏「停止共享」等）后 helper 已无可服务的内容，自行退出，
+        // 否则菜单一直显示运行中、录制指示灯也不会灭
+        capture.onStop = { [weak self] in
+            print("helper_stopped=capture")
+            fflush(stdout)
+            Task {
+                await self?.stop()
+                exit(0)
+            }
+        }
 
         try await capture.start()
         try server.start()
         print("listening=\(wifi ? "0.0.0.0" : "127.0.0.1"):\(port)\(wifi ? " tls_port=\(server.tlsPort) mdns=_mirage._tcp" : "")")
         if let tls {
             print("tls_fingerprint=\(tls.fingerprint.prefix(4).map { String(format: "%02x", $0) }.joined())")
+        }
+        if let controlPort {
+            // 菜单总是同时要 USB + Wi-Fi；在 helper 就绪时直接开，避免控制通道
+            // 在启动窗口期抢跑失败（捕获/虚拟显示器初始化可能超过几秒）
+            do {
+                let identity = try TLSIdentity.loadOrCreate()
+                try server.enableWifi(identity: identity.identity, serviceName: "Mirage")
+                print("wifi enabled at startup")
+            } catch {
+                print("wifi startup failed: \(error)")
+            }
+            let control = ControlServer(port: controlPort) { [weak server] line in
+                guard let server else { return "err stopped" }
+                switch ControlParser.parse(line) {
+                case .wifiOn:
+                    do {
+                        let identity = try TLSIdentity.loadOrCreate()
+                        try server.enableWifi(identity: identity.identity, serviceName: "Mirage")
+                        return "ok"
+                    } catch {
+                        return "err \(error)"
+                    }
+                case .wifiOff:
+                    server.disableWifi()
+                    return "ok"
+                case .wifiStatus:
+                    return server.wifiEnabled ? "on" : "off"
+                case nil:
+                    return "err unknown"
+                }
+            }
+            try control.start()
+            self.controlServer = control
+            print("control=127.0.0.1:\(controlPort)")
         }
         fflush(stdout)
     }
@@ -191,6 +239,8 @@ public final class HelperApp: @unchecked Sendable {
         try? await capture?.stop()
         encoder?.finish()
         server?.stop()
+        controlServer?.stop()
+        controlServer = nil
         virtualDisplay?.destroy()
         virtualDisplay = nil
     }
