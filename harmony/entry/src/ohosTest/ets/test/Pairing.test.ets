@@ -79,16 +79,16 @@ export default function pairingTest() {
   });
 
   describe('settings', () => {
-    it('persists pairing and transport mode', 0, async () => {
+    it('persists pairing but starts every launch in AUTO', 0, async () => {
       const kv = new MemoryStore();
+      kv.putString('transportMode', TransportMode.USB);
       const store = new SettingsStore(kv);
       await store.savePairing('192.168.1.9', 7778, FP);
-      await store.saveTransportMode(TransportMode.WIFI);
       const loaded = new SettingsStore(kv).load();
       expect(loaded.host).assertEqual('192.168.1.9');
       expect(loaded.port).assertEqual(7778);
       expect(loaded.fingerprintHex).assertEqual(FP);
-      expect(loaded.transportMode).assertEqual(TransportMode.WIFI);
+      expect(loaded.transportMode).assertEqual(TransportMode.AUTO);
     });
 
     it('generates a stable 16-byte device id', 0, async () => {

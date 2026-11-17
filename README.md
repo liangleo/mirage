@@ -159,3 +159,19 @@ cd android
 - 调试开关打开后，左下角显示帧率、码率、丢帧、软/硬解、手机与 Mac 的分辨率，以及 `decode / e2e / rtt` 三项延迟（单位均为 ms）。
 - 连接成功期间保持屏幕常亮。
 - 手机重连/重启后需要重跑 `make connect` 设置 adb reverse。
+
+## 鸿蒙（HarmonyOS）
+
+```bash
+make build.harmony   # 需要 DevEco Studio（DEVECO_HOME），产物为 entry-default-signed.hap
+make install.hap     # hdc 安装主 HAP 到已连接设备/模拟器
+make test.harmony    # 构建 ohosTest HAP 并在设备上跑单测
+```
+
+- 连接方式与 Android 客户端一致：AUTO / Wi-Fi / TCP / USB 四种通道。AUTO 在检测到 Mirage USB 配件时优先走 USB，否则退回 mDNS 发现的 Wi-Fi；Wi-Fi 填了 64 位十六进制指纹走 TLS，否则明文连 TCP 端口。点「发现 Mac」用 mDNS 自动填地址。
+- TCP 模式（USB 调试通道）需要先 `make connect.harmony` 做 hdc 端口反向转发。
+- **USB 为实验特性**，需要 Mac 端 AOA 桥：菜单栏 App 打开「USB 免调试连接（AOA）」，或手动运行 `build/aoa_bridge --port 7777`（此时 helper 以 `--mode extend --port 7777` 的 loopback 模式启动）。
+- 首次 USB 连接会弹系统授权，需同意；拒绝后本次会话停止重试，重新点「连接」可再试。
+- 部分厂商 ROM 的 accessory 通道可能不通，此时回退 Wi-Fi 使用。
+- 拔出 USB 后提示「USB 已断开，请重新插入」，App 每秒检查一次配件列表，重新插线自动恢复；点「断开」立即停止等待。
+- 构建与真机测试的详细环境变量见 `harmony/TESTING.md`。

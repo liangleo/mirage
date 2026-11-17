@@ -37,6 +37,12 @@ export class Frame {
 export class FrameDecoder {
   private buf: Uint8Array = new Uint8Array(0);
   private len: number = 0;
+  // Bytes thrown away looking for the next frame header.
+  skippedBytes: number = 0;
+  // Frame the parser is currently waiting for; 0 when idle. Diagnostics only.
+  pendingTotal: number = 0;
+  pendingType: number = 0;
+  pendingHave: number = 0;
 
   append(data: Uint8Array): void {
     if (this.len + data.length > this.buf.length) {
@@ -53,28 +59,103 @@ export class FrameDecoder {
   }
 
   next(): Frame | null {
-    if (this.len < 4) {
+    if (this.len < 5) {
       return null;
     }
     const view = new DataView(this.buf.buffer, this.buf.byteOffset, this.len);
-    const length = view.getUint32(0);
-    if (length < 1) {
-      throw new ProtocolException(`malformed length ${length}`);
+    // The stream does not always start on a frame boundary: an AOA reconnect
+    // resumes mid-frame and the bridge can splice a stale tail in front. Scan
+    // for the next plausible header instead of trusting byte 0.
+    let start = 0;
+    while (this.len - start >= 5) {
+      const length = view.getUint32(start);
+      const type = this.buf[start + 4];
+      if (this.plausible(start, length, type)) {
+        const total = 4 + length;
+        if (this.len - start >= total) {
+          const payload = this.buf.slice(start + 5, start + total);
+          this.skip(start);
+          this.drop(total);
+          this.pendingTotal = 0;
+          return new Frame(type, payload);
+        }
+        // A plausible header whose payload is still in flight. Drop whatever
+        // precedes it and wait — resync scans over payload bytes, so it has to
+        // be able to lock onto a frame that spans several reads.
+        this.skip(start);
+        this.pendingTotal = total;
+        this.pendingType = type;
+        this.pendingHave = this.len;
+        return null;
+      }
+      start += 1;
     }
-    if (length > MAX_PAYLOAD + 1) {
-      throw new ProtocolException(`oversized frame ${length}`);
+    this.pendingTotal = 0;
+    // Keep the tail: it may be the beginning of a header split across reads.
+    this.skip(this.len - Math.min(this.len, 4));
+    return null;
+  }
+
+  private plausible(start: number, length: number, type: number): boolean {
+    if (length < 1 || length > MAX_PAYLOAD + 1) {
+      return false;
     }
-    const total = 4 + length;
-    if (this.len < total) {
-      return null;
+    switch (type) {
+      case MessageType.HELLO:
+        return length >= 33 && length <= 288;
+      case MessageType.SESSION_CONFIG:
+        return length >= 12 && length <= 13;
+      case MessageType.VIDEO:
+        // The payload starts with codec=1 (H.264) and a keyframe flag. Checking
+        // both while resyncing discards almost every coincidence found inside a
+        // compressed frame, including a bogus huge length at byte 0.
+        if (length < 19) {
+          return false;
+        }
+        if (this.len - start < 7) {
+          // Not enough bytes to judge the codec/flags prefix yet: undecided.
+          return true;
+        }
+        return this.buf[start + 5] === 1 && this.buf[start + 6] <= 1;
+      case MessageType.INPUT:
+        return length >= 35 && length <= 1027;
+      case MessageType.FEEDBACK:
+        return length === 29;
+      case MessageType.CTRL:
+        return length >= 2 && length <= 258;
+      case MessageType.PING:
+        return length === 9 || length === 17;
+      case MessageType.BYE:
+        return length === 1;
+      case MessageType.KEY:
+        return length === 19;
+      case MessageType.TEXT:
+        return length >= 12 && length <= 4107;
+      case MessageType.SCROLL:
+        return length === 21;
+      case MessageType.UDP_CONFIG:
+        return length === 41;
+      default:
+        return false;
     }
-    const type = this.buf[4];
-    const payload = this.buf.slice(5, total);
-    this.len -= total;
+  }
+
+  private skip(count: number): void {
+    if (count <= 0) {
+      return;
+    }
+    this.skippedBytes += count;
+    this.drop(count);
+  }
+
+  private drop(count: number): void {
+    if (count <= 0) {
+      return;
+    }
+    this.len -= count;
     if (this.len > 0) {
-      this.buf.copyWithin(0, total, total + this.len);
+      this.buf.copyWithin(0, count, count + this.len);
     }
-    return new Frame(type, payload);
   }
 }
 
@@ -122,6 +203,10 @@ export class VideoFrame {
 }
 
 function encodeUtf8(text: string): Uint8Array {
+  if (text.length === 0) {
+    // 系统 encodeInto('') 返回 undefined，而不是空数组
+    return new Uint8Array(0);
+  }
   const encoded = new util.TextEncoder().encodeInto(text);
   return encoded;
 }

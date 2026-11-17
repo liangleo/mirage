@@ -1,6 +1,3 @@
-export const EDGE_FRACTION: number = 0.15;
-export const EDGE_SWIPE_VP: number = 40;
-
 export class ContentRect {
   width: number;
   height: number;
@@ -37,20 +34,6 @@ export function normalizePoint(xVp: number, yVp: number, widthVp: number, height
     return new Point(0, 0);
   }
   return new Point(clamp01(xVp / widthVp), clamp01(yVp / heightVp));
-}
-
-export function isEdgeStart(xVp: number, widthVp: number): boolean {
-  if (widthVp <= 0) {
-    return false;
-  }
-  return xVp >= widthVp * (1 - EDGE_FRACTION);
-}
-
-export function isEdgeSwipe(startXVp: number, widthVp: number, currentXVp: number): boolean {
-  if (!isEdgeStart(startXVp, widthVp)) {
-    return false;
-  }
-  return startXVp - currentXVp >= EDGE_SWIPE_VP;
 }
 
 function clamp01(value: number): number {

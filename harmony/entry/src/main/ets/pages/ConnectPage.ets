@@ -14,9 +14,18 @@ import { TcpTransport } from '../transport/TcpTransport';
 import { TlsTransport } from '../transport/TlsTransport';
 import { Transport } from '../transport/Transport';
 import { selectTransport, TransportChoice, TransportKind } from '../transport/TransportSelector';
+import {
+  hasUsbAccessory,
+  shouldWaitForUsb,
+  SystemUsbPort,
+  systemUsbBridge,
+  UsbTransport
+} from '../transport/UsbTransport';
 
 const DOMAIN = 0x0200;
 const TAG = 'MirageConnect';
+const USB_WAIT_POLL_MS = 500;
+const USB_WAIT_TIMEOUT_MS = 15000;
 
 class UiListener extends SessionListener {
   private stateCb: (model: SessionModel) => void;
@@ -68,6 +77,9 @@ struct ConnectPage {
   private hello: Hello = new Hello();
   private pushed: boolean = false;
   private discovery: MdnsDiscovery | null = null;
+  private usbWaitTimer: number = -1;
+  private usbWaitDeadlineMs: number = 0;
+  private usbWanted: boolean = false;
 
   aboutToAppear(): void {
     this.init();
@@ -78,6 +90,7 @@ struct ConnectPage {
       this.discovery.stop();
       this.discovery = null;
     }
+    this.stopUsbWait();
   }
 
   onPageShow(): void {
@@ -169,6 +182,14 @@ struct ConnectPage {
     Runtime.closedReason = reason;
     this.status = reason;
     this.busy = false;
+    if (this.usbWanted && shouldWaitForUsb(reason)) {
+      this.startUsbWait();
+    } else if (this.usbWanted && reason.indexOf('USB 权限') < 0 && reason.indexOf('USB 授权') < 0) {
+      // Mac 侧退出后设备留在 AOA，重启 Mac App 也找不到它，只有拔插能恢复
+      this.status = 'Mac 已断开，请拔插数据线后重连';
+    }
+    // 串流页在栈顶，由它弹回本页；这里只负责最终状态
+    Runtime.onClosed(reason);
   }
 
   private applyPairing(): void {
@@ -225,6 +246,8 @@ struct ConnectPage {
   }
 
   private selectMode(mode: TransportMode): void {
+    this.usbWanted = false;
+    this.stopUsbWait();
     this.mode = mode;
     if (mode === TransportMode.WIFI) {
       this.portText = '7778';
@@ -233,40 +256,48 @@ struct ConnectPage {
     } else if (mode === TransportMode.AUTO) {
       this.portText = '';
     }
-    const store = this.store;
-    if (store !== null) {
-      store.saveTransportMode(mode).catch((err: Error) => {
-        hilog.warn(DOMAIN, TAG, 'save mode failed: %{public}s', err.message);
-      });
-    }
   }
 
   private connect(): void {
     if (this.busy) {
       return;
     }
+    this.stopUsbWait();
     const host = this.host.trim();
     const port = Number(this.portText.trim());
-    const choice = selectTransport(this.mode, false, host, Number.isFinite(port) ? port : 0);
+    const choice = selectTransport(
+      this.mode,
+      hasUsbAccessory(new SystemUsbPort()),
+      host,
+      Number.isFinite(port) ? port : 0);
     if (choice === null) {
       this.status = '请填写主机与端口';
       return;
     }
     if (choice.kind === TransportKind.WAIT_USB) {
-      this.status = '等待 USB 设备（H1 暂未接入）';
+      this.usbWanted = true;
+      this.busy = false;
+      this.status = '等待 USB 连接…';
+      this.startUsbWait();
       return;
     }
+    this.usbWanted = choice.kind === TransportKind.USB;
     this.busy = true;
     this.status = '连接中…';
     const fingerprint = this.fingerprint.trim().toLowerCase();
     const tls = choice.kind === TransportKind.WIFI && fingerprint.length === 64;
-    Runtime.transportLabel = tls ? `Wi-Fi TLS ${choice.host}:${choice.port}` :
-      `${choice.kind} ${choice.host}:${choice.port}`;
+    Runtime.transportLabel = choice.kind === TransportKind.USB ? 'USB AOA' :
+      (tls ? `Wi-Fi TLS ${choice.host}:${choice.port}` : `${choice.kind} ${choice.host}:${choice.port}`);
     Runtime.transportName = choice.kind === TransportKind.WIFI ? 'Wi-Fi' :
       (choice.kind === TransportKind.USB ? 'USB' : 'TCP');
     Runtime.stats = new Stats();
 
     const session = new ClientSession(choice, (selected: TransportChoice): Transport => {
+      if (selected.kind === TransportKind.USB) {
+        return new UsbTransport(new SystemUsbPort(), systemUsbBridge(), () => {
+          this.status = '等待 USB 授权…';
+        });
+      }
       if (selected.kind === TransportKind.WIFI && tls) {
         return new TlsTransport(selected.host, selected.port, fingerprint);
       }
@@ -296,6 +327,8 @@ struct ConnectPage {
   }
 
   private disconnect(): void {
+    this.usbWanted = false;
+    this.stopUsbWait();
     const session = Runtime.session;
     if (session !== null) {
       session.stop();
@@ -304,6 +337,43 @@ struct ConnectPage {
     Runtime.hasConfig = false;
     this.busy = false;
     this.status = '已断开';
+  }
+
+  private startUsbWait(): void {
+    if (this.usbWaitTimer !== -1) {
+      return;
+    }
+    const now = Date.now();
+    if (now >= this.usbWaitDeadlineMs) {
+      this.usbWaitDeadlineMs = now + USB_WAIT_TIMEOUT_MS;
+    }
+    // 配件已经在（AOA 里主机没起来）时反复 open/close 会把 USB 服务拖死，界面跟着卡住；
+    // 这种只有用户手动点连接靠谱。配件真的不在（等插线）才自动连。
+    const autoConnect = !hasUsbAccessory(new SystemUsbPort());
+    this.status = autoConnect ? '等待 USB 连接…' : '正在等待 USB 恢复…';
+    this.usbWaitTimer = setInterval(() => {
+      if (Date.now() > this.usbWaitDeadlineMs) {
+        this.stopUsbWait();
+        this.status = autoConnect ? '未检测到 USB 设备' : 'Mac 未响应，请确认 Mac 端 USB 已开启后重试';
+        return;
+      }
+      if (!autoConnect || this.busy) {
+        return;
+      }
+      const present = hasUsbAccessory(new SystemUsbPort());
+      if (!present) {
+        return;
+      }
+      this.stopUsbWait();
+      this.connect();
+    }, USB_WAIT_POLL_MS);
+  }
+
+  private stopUsbWait(): void {
+    if (this.usbWaitTimer !== -1) {
+      clearInterval(this.usbWaitTimer);
+      this.usbWaitTimer = -1;
+    }
   }
 
   build() {

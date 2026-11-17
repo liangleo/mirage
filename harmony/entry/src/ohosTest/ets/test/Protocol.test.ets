@@ -2,7 +2,6 @@ import { describe, it, expect } from '@ohos/hypium';
 import {
   FrameDecoder,
   MessageType,
-  ProtocolException,
   Hello,
   encodeHello,
   encodePing,
@@ -60,6 +59,13 @@ export default function protocolTest() {
       expect(toHex(encodeHello(hello))).assertEqual(VECTOR_HELLO);
     });
 
+    it('encodes hello with an empty name', 0, () => {
+      const frame = encodeHello(new Hello());
+      expect(frame.length).assertEqual(37);
+      expect(frame[4]).assertEqual(MessageType.HELLO);
+      expect(frame[36]).assertEqual(0);
+    });
+
     it('decodes session config from vectors', 0, () => {
       const decoder = new FrameDecoder();
       decoder.append(hexToBytes(VECTOR_SESSION_CONFIG));
@@ -94,26 +100,36 @@ export default function protocolTest() {
       expect(decoder.next() === null).assertTrue();
     });
 
-    it('rejects oversized and zero length', 0, () => {
-      let oversized = false;
-      try {
-        const decoder = new FrameDecoder();
-        decoder.append(new Uint8Array([0x02, 0x00, 0x00, 0x01, MessageType.PING]));
-        decoder.next();
-      } catch (e) {
-        oversized = e instanceof ProtocolException;
-      }
-      expect(oversized).assertTrue();
+    it('resyncs past a zero length header', 0, () => {
+      const zero = new Uint8Array([0x00, 0x00, 0x00, 0x00, MessageType.PING]);
+      const ping = encodePing(7);
+      const decoder = new FrameDecoder();
+      decoder.append(concat(zero, ping));
+      const frame = decoder.next();
+      expect(frame!.type).assertEqual(MessageType.PING);
+      expect(decodePing(frame!.payload)).assertEqual(7);
+      expect(decoder.skippedBytes).assertEqual(zero.length);
+    });
 
-      let zero = false;
-      try {
-        const decoder = new FrameDecoder();
-        decoder.append(new Uint8Array([0x00, 0x00, 0x00, 0x00, MessageType.PING]));
-        decoder.next();
-      } catch (e) {
-        zero = e instanceof ProtocolException;
-      }
-      expect(zero).assertTrue();
+    it('resyncs onto a frame after leading garbage', 0, () => {
+      const garbage = new Uint8Array(37);
+      garbage.fill(0xff);
+      const ping = encodePing(1000);
+      const decoder = new FrameDecoder();
+      decoder.append(concat(garbage, ping));
+      const frame = decoder.next();
+      expect(frame!.type).assertEqual(MessageType.PING);
+      expect(decodePing(frame!.payload)).assertEqual(1000);
+      expect(decoder.skippedBytes).assertEqual(garbage.length);
+    });
+
+    it('skips an unknown message type', 0, () => {
+      const decoder = new FrameDecoder();
+      decoder.append(concat(encodeFrame(99, new Uint8Array([1, 2, 3])), encodePing(5)));
+      const frame = decoder.next();
+      expect(frame!.type).assertEqual(MessageType.PING);
+      expect(decodePing(frame!.payload)).assertEqual(5);
+      expect(decoder.next() === null).assertTrue();
     });
 
     it('decodes video header and annex-b payload', 0, () => {
@@ -131,12 +147,58 @@ export default function protocolTest() {
       expect(toHex(video.annexB)).assertEqual(VECTOR_VIDEO_PAYLOAD);
     });
 
-    it('ignores unknown message types at frame level', 0, () => {
+    it('resyncs past a plausible but bogus video header', 0, () => {
+      // Opening mid-frame can leave a header-shaped coincidence at byte 0 with
+      // a huge length; waiting for it would starve the stream forever.
+      const bogus = new Uint8Array([0x00, 0x10, 0x00, 0x00, MessageType.VIDEO, 0x7f, 0x7f]);
+      const ping = encodePing(11);
       const decoder = new FrameDecoder();
-      decoder.append(encodeFrame(99, new Uint8Array([1, 2, 3])));
+      decoder.append(concat(bogus, ping));
       const frame = decoder.next();
-      expect(frame!.type).assertEqual(99);
-      expect(frame!.payload.length).assertEqual(3);
+      expect(frame!.type).assertEqual(MessageType.PING);
+      expect(decodePing(frame!.payload)).assertEqual(11);
+      expect(decoder.skippedBytes).assertEqual(bogus.length);
+    });
+
+    it('rejects a ping header with the wrong length', 0, () => {
+      const bogus = new Uint8Array([0x00, 0x00, 0x10, 0x00, MessageType.PING, 0, 0, 0, 0]);
+      const ping = encodePing(3);
+      const decoder = new FrameDecoder();
+      decoder.append(concat(bogus, ping));
+      const frame = decoder.next();
+      expect(frame!.type).assertEqual(MessageType.PING);
+      expect(decodePing(frame!.payload)).assertEqual(3);
+    });
+
+    it('locks onto a large frame that starts after garbage', 0, () => {
+      // Resync finds the header while the payload is still in flight; dropping
+      // the header here would lose every frame bigger than one read.
+      const garbage = new Uint8Array(9);
+      garbage.fill(0xff);
+      const payload = new Uint8Array(30);
+      payload[0] = 1;
+      payload[1] = 1;
+      const video = encodeFrame(MessageType.VIDEO, payload);
+      const decoder = new FrameDecoder();
+      decoder.append(concat(garbage, video.slice(0, 10)));
+      expect(decoder.next() === null).assertTrue();
+      expect(decoder.pendingTotal).assertEqual(video.length);
+      decoder.append(video.slice(10));
+      const frame = decoder.next();
+      expect(frame!.type).assertEqual(MessageType.VIDEO);
+      expect(frame!.payload.length).assertEqual(video.length - 5);
+      expect(decoder.pendingTotal).assertEqual(0);
+    });
+
+    it('keeps a split header across reads', 0, () => {
+      const full = encodePing(42);
+      const decoder = new FrameDecoder();
+      decoder.append(full.slice(0, 4));
+      expect(decoder.next() === null).assertTrue();
+      expect(decoder.skippedBytes).assertEqual(0);
+      decoder.append(full.slice(4));
+      expect(decodePing(decoder.next()!.payload)).assertEqual(42);
+      expect(decoder.skippedBytes).assertEqual(0);
     });
   });
 }

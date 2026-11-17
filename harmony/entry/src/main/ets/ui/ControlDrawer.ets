@@ -2,12 +2,15 @@
 export struct ControlDrawer {
   @Prop inputOn: boolean;
   @Prop keyboardOn: boolean;
+  @Prop debugOn: boolean;
   @Prop capsOk: boolean;
   @Prop gateEnabled: boolean;
   @Prop gateReason: string;
   onToggleInput: () => void = () => {
   };
   onToggleKeyboard: () => void = () => {
+  };
+  onToggleDebug: () => void = () => {
   };
   onDisconnect: () => void = () => {
   };
@@ -45,6 +48,18 @@ export struct ControlDrawer {
           .onChange((isOn: boolean) => {
             if (isOn !== this.keyboardOn) {
               this.onToggleKeyboard();
+            }
+          })
+      }
+      .width('100%')
+
+      Row() {
+        Text('调试信息').fontSize(16).fontColor(Color.White)
+        Blank()
+        Toggle({ type: ToggleType.Switch, isOn: this.debugOn })
+          .onChange((isOn: boolean) => {
+            if (isOn !== this.debugOn) {
+              this.onToggleDebug();
             }
           })
       }

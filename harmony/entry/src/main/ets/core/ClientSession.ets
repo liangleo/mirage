@@ -12,6 +12,7 @@ import {
   VideoFrame
 } from './Protocol';
 import {
+  backoffMs,
   reduce,
   ReduceResult,
   SessionEvent,
@@ -23,7 +24,7 @@ import {
 import { Stats } from './Stats';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Transport } from '../transport/Transport';
-import { TransportChoice } from '../transport/TransportSelector';
+import { TransportChoice, TransportKind } from '../transport/TransportSelector';
 import { InputGate } from './InputGate';
 import {
   CtrlCode,
@@ -75,6 +76,8 @@ export class ClientSession {
   private transport: Transport | null = null;
   private decoder: FrameDecoder = new FrameDecoder();
   private generation: number = 0;
+  private resyncLogged: boolean = false;
+  private lastStallLogMs: number = 0;
   private connected: boolean = false;
   private stopped: boolean = false;
   private lastInboundMs: number = 0;
@@ -205,6 +208,7 @@ export class ClientSession {
     const generation = ++this.generation;
     this.transport = transport;
     this.decoder = new FrameDecoder();
+    this.resyncLogged = false;
     transport.onData((data: Uint8Array) => {
       this.onData(generation, data);
     });
@@ -242,6 +246,18 @@ export class ClientSession {
         this.lastInboundMs = Date.now();
         this.handleFrame(frame);
         frame = this.decoder.next();
+      }
+      if (this.decoder.skippedBytes > 0 && !this.resyncLogged) {
+        this.resyncLogged = true;
+        hilog.warn(0x0200, 'MirageSession', 'resynced: skipped %{public}d bytes',
+          this.decoder.skippedBytes);
+      }
+      const now = Date.now();
+      if (this.decoder.pendingTotal > 0 && now - this.lastStallLogMs > 2000) {
+        this.lastStallLogMs = now;
+        hilog.warn(0x0200, 'MirageSession',
+          'waiting for type=%{public}d total=%{public}d have=%{public}d',
+          this.decoder.pendingType, this.decoder.pendingTotal, this.decoder.pendingHave);
       }
     } catch (err) {
       this.onTransportClosed(generation, (err as Error).message);
@@ -308,8 +324,17 @@ export class ClientSession {
     }
     hilog.warn(0x0200, 'MirageSession', 'closed: %{public}s (gen %{public}d)', reason, generation);
     this.closeTransport();
-    // 指纹不匹配是永久错误，重试没有意义，直接停到 Stopped 让 UI 提示
-    if (reason.indexOf('证书指纹不匹配') >= 0) {
+    // 指纹不匹配、USB 授权被拒/超时都是永久错误，重试只会反复弹窗或必然失败，直接停到 Stopped
+    if (reason.indexOf('证书指纹不匹配') >= 0 || reason.indexOf('USB 权限被拒绝') >= 0 ||
+      reason.indexOf('USB 授权超时') >= 0) {
+      this.dispatch(new SessionEvent(SessionEventKind.DISCONNECT), () => {
+      });
+      this.listener.onClosed(reason);
+      return;
+    }
+    // USB 设备一掉线就留在 AOA，Mac 桥只认 12d1:5000、不会自己接回来；重试只会
+    // 弹系统 USB 授权框并把冻结画面多留几十秒。直接结束，回连接页等拔插。
+    if (this.choice.kind === TransportKind.USB) {
       this.dispatch(new SessionEvent(SessionEventKind.DISCONNECT), () => {
       });
       this.listener.onClosed(reason);
@@ -320,7 +345,7 @@ export class ClientSession {
     this.dispatch(new SessionEvent(SessionEventKind.CLOSED, reason), () => {
     });
     if (this.model.state === SessionState.Recovering) {
-      const delay = Math.max(this.model.reconnectAtMs - Date.now(), 0);
+      const delay = backoffMs(this.model.attempts);
       this.retryTimer = setTimeout(() => {
         this.retryTimer = -1;
         if (this.stopped) {

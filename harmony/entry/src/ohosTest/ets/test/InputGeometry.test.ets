@@ -2,8 +2,6 @@ import { describe, it, expect } from '@ohos/hypium';
 import {
   ContentRect,
   fitContent,
-  isEdgeStart,
-  isEdgeSwipe,
   normalizePoint,
   Point
 } from '../../../main/ets/input/InputGeometry';
@@ -40,18 +38,7 @@ export default function inputGeometryTest() {
       expect(empty.y).assertEqual(0);
     });
 
-    it('classifies right-edge swipe without eating inner taps', 0, () => {
-      expect(isEdgeStart(870, 1000)).assertTrue();
-      expect(isEdgeStart(800, 1000)).assertFalse();
-      expect(isEdgeSwipe(900, 1000, 850)).assertTrue();
-      expect(isEdgeSwipe(900, 1000, 880)).assertFalse();
-      expect(isEdgeSwipe(800, 1000, 700)).assertFalse();
-      expect(isEdgeSwipe(900, 1000, 870)).assertFalse();
-    });
-
-    it('ignores edge checks for degenerate widths', 0, () => {
-      expect(isEdgeStart(10, 0)).assertFalse();
-      expect(isEdgeSwipe(10, 0, -50)).assertFalse();
+    it('ignores degenerate widths', 0, () => {
       const rect: ContentRect = new ContentRect();
       expect(rect.width).assertEqual(0);
     });

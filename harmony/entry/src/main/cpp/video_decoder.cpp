@@ -4,9 +4,15 @@
 #include <cstring>
 #include <hilog/log.h>
 
+// Domain 0 is dropped by the log service, so the OH_LOG_* macros would print
+// nothing in a hilog dump. Keep this in sync with the ArkTS side.
+#undef LOG_DOMAIN
+#undef LOG_TAG
+#define LOG_DOMAIN 0x0200
+#define LOG_TAG "MirageNative"
+
 namespace {
 constexpr int32_t kMaxQueuedFrames = 4;
-constexpr const char *kLogTag = "MirageNative";
 
 int64_t NowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -74,6 +80,14 @@ bool VideoDecoder::Open(int32_t width, int32_t height, int32_t fps, uint64_t sur
         Emit(DecoderEvent{.kind = "decoderError", .reason = "准备解码器失败"});
         return false;
     }
+    windowReady_.store(true);
+    // Open before Start: the codec asks for all its input buffers the instant it
+    // starts, and HandleInput drops a buffer while the decoder is not open. That
+    // buffer is never given back, so losing the burst starves the codec for good
+    // — need stops growing, frames pile up and get dropped, the picture stays
+    // black. The race window was microseconds wide, which is why it only broke
+    // some reconnects.
+    open_.store(true);
     OH_AVErrCode start = OH_VideoDecoder_Start(codec_);
     if (start != AV_ERR_OK) {
         Close();
@@ -85,24 +99,9 @@ bool VideoDecoder::Open(int32_t width, int32_t height, int32_t fps, uint64_t sur
     return true;
 }
 
-bool VideoDecoder::SetSurface(uint64_t surfaceId) {
-    if (surfaceId == 0) {
-        return false;
-    }
-    if (surfaceId == surfaceId_) {
-        return codec_ != nullptr;
-    }
-    const auto emit = emit_;
-    const int32_t width = width_;
-    const int32_t height = height_;
-    const int32_t fps = fps_;
-    Close();
-    return Open(width, height, fps, surfaceId, emit);
-}
-
 int32_t VideoDecoder::Submit(std::vector<uint8_t> &&data, int32_t flags, int64_t frameId,
     int64_t captureTsMicros) {
-    if (codec_ == nullptr) {
+    if (!open_.load()) {
         return -1;
     }
     bool dropped = false;
@@ -119,13 +118,34 @@ int32_t VideoDecoder::Submit(std::vector<uint8_t> &&data, int32_t flags, int64_t
         Emit(DecoderEvent{.kind = "dropped", .frameId = frameId, .bytes = 0});
     }
     Pump();
+    int32_t submitted = ++submitCount_;
+    if (submitted == 1 || submitted % 120 == 0) {
+        OH_LOG_INFO(LOG_APP, "MirageNative decoder submit=%{public}d need=%{public}d in=%{public}d",
+            submitted, needCount_.load(), inCount_.load());
+    }
     return dropped ? 1 : 0;
 }
 
+void VideoDecoder::Suspend() {
+    open_.store(false);
+    windowReady_.store(false);
+}
+
 void VideoDecoder::Close() {
+    Suspend();
+    // Stop/Destroy wait for in-flight codec callbacks to return. The callbacks
+    // must therefore never take codecLock_: doing so deadlocks the codec worker
+    // and every later open/close queued behind it. windowReady_ tells the
+    // output callback whether the surface is still safe to render into.
+    std::lock_guard<std::mutex> codecGuard(codecLock_);
     if (codec_ != nullptr) {
-        OH_VideoDecoder_Stop(codec_);
-        OH_VideoDecoder_Destroy(codec_);
+        OH_AVErrCode stopped = OH_VideoDecoder_Stop(codec_);
+        OH_AVErrCode destroyed = OH_VideoDecoder_Destroy(codec_);
+        OH_LOG_INFO(LOG_APP,
+            "MirageNative decoder closed submit=%{public}d need=%{public}d in=%{public}d out=%{public}d"
+            " stop=%{public}d destroy=%{public}d",
+            submitCount_.load(), needCount_.load(), inCount_.load(), outCount_.load(),
+            static_cast<int32_t>(stopped), static_cast<int32_t>(destroyed));
         codec_ = nullptr;
     }
     ReleaseWindow();
@@ -169,10 +189,15 @@ void VideoDecoder::OnNeedInput(OH_AVCodec *, uint32_t index, OH_AVBuffer *buffer
 }
 
 void VideoDecoder::HandleInput(uint32_t index, OH_AVBuffer *buffer) {
+    int32_t needed = ++needCount_;
+    if (needed == 1 || needed % 120 == 0) {
+        OH_LOG_INFO(LOG_APP, "MirageNative decoder need=%{public}d submit=%{public}d in=%{public}d",
+            needed, submitCount_.load(), inCount_.load());
+    }
     Frame frame;
     {
         std::lock_guard<std::mutex> guard(lock_);
-        if (error_ || codec_ == nullptr) {
+        if (error_ || !open_.load()) {
             return;
         }
         if (queue_.empty()) {
@@ -186,6 +211,9 @@ void VideoDecoder::HandleInput(uint32_t index, OH_AVBuffer *buffer) {
 }
 
 bool VideoDecoder::PushFrame(uint32_t index, OH_AVBuffer *buffer, Frame &frame) {
+    if (codec_ == nullptr) {
+        return false;
+    }
     uint8_t *dst = OH_AVBuffer_GetAddr(buffer);
     int32_t capacity = OH_AVBuffer_GetCapacity(buffer);
     if (dst == nullptr || capacity < static_cast<int32_t>(frame.data.size())) {
@@ -212,16 +240,27 @@ bool VideoDecoder::PushFrame(uint32_t index, OH_AVBuffer *buffer, Frame &frame) 
         Emit(DecoderEvent{.kind = "decoderError", .reason = "提交输入帧失败"});
         return false;
     }
+    int32_t pushed = ++inCount_;
+    if (pushed == 1 || pushed % 120 == 0) {
+        OH_LOG_INFO(LOG_APP, "MirageNative decoder in=%{public}d size=%{public}d flags=%{public}d",
+            pushed, attr.size, frame.flags);
+    }
     return true;
 }
 
 void VideoDecoder::Pump() {
+    // Runs on the JS thread. Never waits for a Close: a decoder being torn down
+    // clears the queue anyway, so losing this pump loses nothing.
+    std::unique_lock<std::mutex> codecGuard(codecLock_, std::defer_lock);
+    if (!codecGuard.try_lock()) {
+        return;
+    }
     while (true) {
         PendingInput pending;
         Frame frame;
         {
             std::lock_guard<std::mutex> guard(lock_);
-            if (pending_.empty() || queue_.empty() || codec_ == nullptr) {
+            if (pending_.empty() || queue_.empty() || !open_.load()) {
                 return;
             }
             pending = pending_.front();
@@ -242,7 +281,12 @@ void VideoDecoder::OnNewOutput(OH_AVCodec *codec, uint32_t index, OH_AVBuffer *b
     }
     OH_AVCodecBufferAttr attr{};
     OH_AVBuffer_GetBufferAttr(buffer, &attr);
-    if (self->window_ != nullptr) {
+    int32_t produced = ++self->outCount_;
+    if (produced == 1 || produced % 120 == 0) {
+        OH_LOG_INFO(LOG_APP, "MirageNative decoder out=%{public}d in=%{public}d size=%{public}d flags=%{public}d",
+            produced, self->inCount_.load(), attr.size, attr.flags);
+    }
+    if (self->windowReady_.load()) {
         OH_VideoDecoder_RenderOutputBuffer(codec, index);
     } else {
         OH_VideoDecoder_FreeOutputBuffer(codec, index);

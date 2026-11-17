@@ -1,4 +1,3 @@
-import { EdgeDecision, EdgeGesture } from '../input/EdgeGesture';
 import { GestureEvent, GestureMapper, TouchAction, TouchFrame, TouchSample, TouchTool } from '../input/GestureMapper';
 import { normalizePoint, Point } from '../input/InputGeometry';
 
@@ -8,33 +7,10 @@ export struct InputOverlay {
   @Prop contentHeight: number;
   onEvents: (events: GestureEvent[]) => void = (events: GestureEvent[]) => {
   };
-  onOpenDrawer: () => void = () => {
-  };
   private mapper: GestureMapper = new GestureMapper();
-  private edge: EdgeGesture = new EdgeGesture();
-
-  private firstX(event: TouchEvent): number {
-    return event.touches.length > 0 ? event.touches[0].x : 0;
-  }
 
   private handleTouch(event: TouchEvent): void {
     const type = event.type;
-    if (type === TouchType.Down) {
-      this.edge.onDown(this.firstX(event), this.contentWidth);
-    } else if (type === TouchType.Move) {
-      const decision = this.edge.onMove(this.firstX(event));
-      if (decision === EdgeDecision.OPEN) {
-        this.mapper.reset();
-        this.onOpenDrawer();
-        return;
-      }
-      if (decision === EdgeDecision.HOLD) {
-        return;
-      }
-    } else if (type === TouchType.Up || type === TouchType.Cancel) {
-      this.edge.onUp();
-    }
-
     let action: TouchAction;
     let touches: TouchObject[];
     if (type === TouchType.Down) {

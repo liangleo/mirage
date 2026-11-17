@@ -6,7 +6,6 @@ import gestureMapperTest from './GestureMapper.test';
 import keyMappingTest from './KeyMapping.test';
 import inputGeometryTest from './InputGeometry.test';
 import imeBridgeTest from './ImeBridge.test';
-import edgeGestureTest from './EdgeGesture.test';
 import clientSessionTest from './ClientSession.test';
 import pairingTest from './Pairing.test';
 import selectorTest from './Selector.test';
@@ -14,6 +13,8 @@ import fingerprintTest from './Fingerprint.test';
 import discoveryPolicyTest from './Discovery.test';
 import sessionMachineTest from './SessionMachine.test';
 import nativeBridgeTest from './NativeBridge.test';
+import usbDeviceTest from './UsbDevice.test';
+import usbTransportTest from './UsbTransport.test';
 
 export default function testsuite() {
   harnessTest();
@@ -24,7 +25,6 @@ export default function testsuite() {
   keyMappingTest();
   inputGeometryTest();
   imeBridgeTest();
-  edgeGestureTest();
   clientSessionTest();
   pairingTest();
   selectorTest();
@@ -32,4 +32,6 @@ export default function testsuite() {
   discoveryPolicyTest();
   sessionMachineTest();
   nativeBridgeTest();
+  usbDeviceTest();
+  usbTransportTest();
 }

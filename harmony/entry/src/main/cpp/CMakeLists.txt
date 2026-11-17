@@ -10,7 +10,7 @@ endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
-add_library(mirage SHARED bridge.cpp video_decoder.cpp)
+add_library(mirage SHARED bridge.cpp video_decoder.cpp usb_transport.cpp)
 
 target_link_libraries(mirage PUBLIC
     libace_napi.z.so

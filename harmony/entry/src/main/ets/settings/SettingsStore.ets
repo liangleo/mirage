@@ -27,7 +27,6 @@ const KEY_HOST = 'host';
 const KEY_PORT = 'port';
 const KEY_FINGERPRINT = 'fingerprint';
 const KEY_DEVICE_ID = 'device_id';
-const KEY_TRANSPORT_MODE = 'transportMode';
 
 function toHex(bytes: Uint8Array): string {
   let out = '';
@@ -49,10 +48,7 @@ export class SettingsStore {
     settings.host = this.kv.getString(KEY_HOST);
     settings.port = this.kv.getInt(KEY_PORT);
     settings.fingerprintHex = this.kv.getString(KEY_FINGERPRINT);
-    const mode = this.kv.getString(KEY_TRANSPORT_MODE);
-    if (mode === TransportMode.USB || mode === TransportMode.WIFI || mode === TransportMode.TCP) {
-      settings.transportMode = mode as TransportMode;
-    }
+    // 传输方式每次启动都回到 AUTO：上次选的 USB 存下来后，掉线就再也回不到自动降级。
     return settings;
   }
 
@@ -60,11 +56,6 @@ export class SettingsStore {
     this.kv.putString(KEY_HOST, host);
     this.kv.putInt(KEY_PORT, port);
     this.kv.putString(KEY_FINGERPRINT, fingerprintHex);
-    await this.kv.flush();
-  }
-
-  async saveTransportMode(mode: TransportMode): Promise<void> {
-    this.kv.putString(KEY_TRANSPORT_MODE, mode);
     await this.kv.flush();
   }
 

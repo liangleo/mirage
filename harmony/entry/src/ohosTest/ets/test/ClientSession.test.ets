@@ -6,6 +6,7 @@ import {
 import { Hello } from '../../../main/ets/core/Protocol';
 import { CtrlCode, encodeCtrl } from '../../../main/ets/core/InputProtocol';
 import { Stats } from '../../../main/ets/core/Stats';
+import { SessionState } from '../../../main/ets/core/SessionMachine';
 import { Transport } from '../../../main/ets/transport/Transport';
 import { TransportChoice, TransportKind } from '../../../main/ets/transport/TransportSelector';
 
@@ -45,10 +46,15 @@ class FakeTransport implements Transport {
 class RecordingListener extends SessionListener {
   gates: boolean[] = [];
   reasons: string[] = [];
+  closed: string[] = [];
 
   onInputGate(enabled: boolean, reason: string): void {
     this.gates.push(enabled);
     this.reasons.push(reason);
+  }
+
+  onClosed(reason: string): void {
+    this.closed.push(reason);
   }
 }
 
@@ -80,6 +86,74 @@ export default function clientSessionTest() {
       expect(listener.gates.length).assertEqual(2);
       expect(listener.gates[1]).assertTrue();
       expect(listener.reasons[1]).assertEqual('');
+
+      session.stop();
+    });
+
+    it('stops retrying when USB access is denied', 0, async () => {
+      const transport = new FakeTransport();
+      const listener = new RecordingListener();
+      let opens = 0;
+      const session = new ClientSession(new TransportChoice(TransportKind.USB, '', 0),
+        (choice: TransportChoice): Transport => {
+          opens += 1;
+          return transport;
+        }, new Hello(), new Stats(), listener);
+      session.start();
+      await tick();
+
+      transport.closedCb('USB 权限被拒绝');
+      await tick();
+
+      expect(opens).assertEqual(1);
+      expect(listener.closed.length).assertEqual(1);
+      expect(listener.closed[0]).assertEqual('USB 权限被拒绝');
+      expect(session.getModel().state).assertEqual(SessionState.Stopped);
+
+      session.stop();
+    });
+
+    it('stops retrying when USB authorization times out', 0, async () => {
+      const transport = new FakeTransport();
+      const listener = new RecordingListener();
+      let opens = 0;
+      const session = new ClientSession(new TransportChoice(TransportKind.USB, '', 0),
+        (choice: TransportChoice): Transport => {
+          opens += 1;
+          return transport;
+        }, new Hello(), new Stats(), listener);
+      session.start();
+      await tick();
+
+      transport.closedCb('USB 授权超时');
+      await tick();
+
+      expect(opens).assertEqual(1);
+      expect(listener.closed.length).assertEqual(1);
+      expect(listener.closed[0]).assertEqual('USB 授权超时');
+      expect(session.getModel().state).assertEqual(SessionState.Stopped);
+
+      session.stop();
+    });
+
+    it('ends a USB session on any close instead of retrying', 0, async () => {
+      const transport = new FakeTransport();
+      const listener = new RecordingListener();
+      let opens = 0;
+      const session = new ClientSession(new TransportChoice(TransportKind.USB, '', 0),
+        (choice: TransportChoice): Transport => {
+          opens += 1;
+          return transport;
+        }, new Hello(), new Stats(), listener);
+      session.start();
+      await tick();
+
+      transport.closedCb('USB 已断开');
+      await tick();
+
+      expect(opens).assertEqual(1);
+      expect(listener.closed.join('|')).assertEqual('USB 已断开');
+      expect(session.getModel().state).assertEqual(SessionState.Stopped);
 
       session.stop();
     });

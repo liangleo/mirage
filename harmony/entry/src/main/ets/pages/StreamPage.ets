@@ -1,7 +1,7 @@
 import { router } from '@kit.ArkUI';
 import { window } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { closeDecoder, DecoderEvent, onEvent, openDecoder, setSurface, submitVideo } from 'libmirage.so';
+import { closeDecoder, DecoderEvent, onEvent, openDecoder, submitVideo } from 'libmirage.so';
 import { Runtime } from '../core/Runtime';
 import { KeyAction, KeyInput, TextInput as TextInputMessage } from '../core/InputProtocol';
 import { SessionConfig, VideoFrame } from '../core/Protocol';
@@ -16,6 +16,8 @@ import { StatsOverlay } from '../ui/StatsOverlay';
 
 const DOMAIN = 0x0100;
 const TAG = 'MirageStream';
+const DECODER_OPEN_TIMEOUT_MS = 3000;
+const DIAG_TIMEOUT_MS = 3000;
 
 @Entry
 @Component
@@ -27,18 +29,26 @@ struct StreamPage {
   @State private contentH: number = 0;
   @State private keyboardOn: boolean = false;
   @State private drawerOpen: boolean = false;
+  @State private debugOn: boolean = false;
   @State private inputOn: boolean = true;
   @State private capsOk: boolean = true;
   @State private gateEnabled: boolean = true;
   @State private gateReason: string = '';
   private surfaceId: string = '';
   private decoderOpen: boolean = false;
+  private decoderPending: boolean = false;
+  private decoderToken: number = 0;
+  private openTimer: number = -1;
+  private diagTimer: number = -1;
+  private rxFrames: number = 0;
+  private decodedFrames: number = 0;
   private tracker: ModifierTracker = new ModifierTracker();
 
   aboutToAppear(): void {
     this.applyWindow(true);
     onEvent((event: DecoderEvent) => {
       if (event.kind === 'frame') {
+        this.decodedFrames += 1;
         Runtime.stats.setDecodeMs(event.decodeMs);
       } else if (event.kind === 'dropped') {
         Runtime.stats.onDropped();
@@ -63,6 +73,11 @@ struct StreamPage {
       this.gateReason = reason;
       this.syncInput();
     };
+    // 会话彻底结束（重试耗尽或 Mac 侧关闭）后不能停在冻结的画面，退回连接页等待
+    Runtime.onClosed = (reason: string) => {
+      hilog.info(DOMAIN, TAG, 'session closed: %{public}s; back to connect', reason);
+      router.back();
+    };
     if (Runtime.hasConfig) {
       this.configWidth = Runtime.config.width;
       this.configHeight = Runtime.config.height;
@@ -78,6 +93,8 @@ struct StreamPage {
     Runtime.onConfig = (config: SessionConfig) => {
     };
     Runtime.onInputGate = (enabled: boolean, reason: string) => {
+    };
+    Runtime.onClosed = (reason: string) => {
     };
     this.stopDecoder();
     const session = Runtime.session;
@@ -111,34 +128,98 @@ struct StreamPage {
   }
 
   private startDecoder(): void {
-    if (this.decoderOpen || this.surfaceId.length === 0 || !Runtime.hasConfig) {
+    if (this.decoderOpen || this.decoderPending || this.surfaceId.length === 0 || !Runtime.hasConfig) {
       return;
     }
     const config = Runtime.config;
-    const opened = openDecoder(config.width, config.height, config.fps > 0 ? config.fps : 60, this.surfaceId);
-    if (opened) {
-      this.decoderOpen = true;
-      hilog.info(DOMAIN, TAG, 'decoder opened %{public}dx%{public}d surface=%{public}s',
-        config.width, config.height, this.surfaceId);
-      const session = Runtime.session;
-      if (session !== null) {
-        session.requestKeyframe();
+    const token = ++this.decoderToken;
+    this.decoderPending = true;
+    // 打开在 codec 工作线程上执行；一直不回调说明那条线程卡住了，别让用户面对纯黑屏
+    this.openTimer = setTimeout(() => {
+      this.openTimer = -1;
+      if (token === this.decoderToken && this.decoderPending) {
+        this.statusText = '解码器启动超时，请断开重连';
       }
-    } else {
-      hilog.error(DOMAIN, TAG, 'decoder open failed');
-    }
+    }, DECODER_OPEN_TIMEOUT_MS);
+    openDecoder(config.width, config.height, config.fps > 0 ? config.fps : 60, this.surfaceId,
+      (opened: boolean) => {
+        if (token !== this.decoderToken) {
+          return;
+        }
+        this.clearOpenTimer();
+        this.decoderPending = false;
+        if (!opened) {
+          hilog.error(DOMAIN, TAG, 'decoder open failed');
+          return;
+        }
+        this.decoderOpen = true;
+        hilog.info(DOMAIN, TAG, 'decoder opened %{public}dx%{public}d surface=%{public}s',
+          config.width, config.height, this.surfaceId);
+        this.startDiagWatch();
+        const session = Runtime.session;
+        if (session !== null) {
+          session.requestKeyframe();
+        }
+      });
   }
 
   private stopDecoder(): void {
-    if (!this.decoderOpen) {
+    this.clearOpenTimer();
+    this.stopDiagWatch();
+    if (!this.decoderOpen && !this.decoderPending) {
       return;
     }
     this.decoderOpen = false;
+    this.decoderPending = false;
+    this.decoderToken++;
     closeDecoder();
     hilog.info(DOMAIN, TAG, 'decoder closed');
   }
 
+  private clearOpenTimer(): void {
+    if (this.openTimer !== -1) {
+      clearTimeout(this.openTimer);
+      this.openTimer = -1;
+    }
+  }
+
+  // 黑屏时唯一能自证的信息：帧到底有没有到、解码器有没有出图
+  private startDiagWatch(): void {
+    if (this.diagTimer !== -1) {
+      return;
+    }
+    this.rxFrames = 0;
+    this.decodedFrames = 0;
+    this.diagTimer = setInterval(() => {
+      if (this.decodedFrames > 0) {
+        this.stopDiagWatch();
+        this.statusText = '';
+        return;
+      }
+      if (this.rxFrames > 0) {
+        // Frames flow but nothing comes out: ask for an IDR instead of sitting
+        // on a black screen — a decoder that started mid-stream may have missed
+        // the parameter sets.
+        this.statusText = `无画面：收到 ${this.rxFrames} 帧，解码 0 帧`;
+        const session = Runtime.session;
+        if (session !== null) {
+          session.requestKeyframe();
+        }
+      } else {
+        this.statusText = '无画面：未收到视频帧';
+      }
+    }, DIAG_TIMEOUT_MS);
+  }
+
+  private stopDiagWatch(): void {
+    if (this.diagTimer !== -1) {
+      clearInterval(this.diagTimer);
+      this.diagTimer = -1;
+    }
+  }
+
   private submitFrame(frame: VideoFrame): void {
+    this.rxFrames += 1;
     if (!this.decoderOpen) {
       return;
     }
@@ -299,9 +380,6 @@ struct StreamPage {
             contentHeight: this.contentH,
             onEvents: (events: GestureEvent[]) => {
               this.dispatchEvents(events);
-            },
-            onOpenDrawer: () => {
-              this.openDrawer();
             }
           })
         }
@@ -333,18 +411,16 @@ struct StreamPage {
           .fontColor('#888888')
       }
 
-      Column({ space: 10 }) {
-        StatsOverlay()
-        Button('返回')
-          .fontSize(13)
-          .height(32)
-          .backgroundColor('#66000000')
-          .onClick(() => {
-            router.back();
-          })
+      if (this.debugOn) {
+        Column() {
+          StatsOverlay()
+        }
+        .width('100%')
+        .height('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(12)
+        .hitTestBehavior(HitTestMode.None)
       }
-      .alignItems(HorizontalAlign.End)
-      .padding(12)
 
       if (!this.drawerOpen) {
         Column() {
@@ -367,6 +443,7 @@ struct StreamPage {
         ControlDrawer({
           inputOn: this.inputOn,
           keyboardOn: this.keyboardOn,
+          debugOn: this.debugOn,
           capsOk: this.capsOk,
           gateEnabled: this.gateEnabled,
           gateReason: this.gateReason,
@@ -380,6 +457,9 @@ struct StreamPage {
               this.closeDrawer();
             }
             this.setKeyboard(turnOn);
+          },
+          onToggleDebug: () => {
+            this.debugOn = !this.debugOn;
           },
           onDisconnect: () => {
             this.disconnect();
