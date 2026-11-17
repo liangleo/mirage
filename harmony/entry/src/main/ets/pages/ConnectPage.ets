@@ -1,7 +1,9 @@
+import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { display } from '@kit.ArkUI';
 import { router } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { scanBarcode } from '@kit.ScanKit';
 import { ClientSession, SessionListener } from '../core/ClientSession';
 import { Hello, SessionConfig, VideoFrame } from '../core/Protocol';
 import { Runtime } from '../core/Runtime';
@@ -80,6 +82,13 @@ struct ConnectPage {
   private usbWaitTimer: number = -1;
   private usbWaitDeadlineMs: number = 0;
   private usbWanted: boolean = false;
+  // 已配对/已手填的 Wi-Fi 地址；AUTO 切模式时用它恢复输入框
+  private pairedHost: string = '';
+  private pairedPort: number = 0;
+  private autoDiscoveryTried: boolean = false;
+  // AUTO 降级链：0=默认(USB 优先)，1=跳过 USB，2=只走 TCP
+  private autoStage: number = 0;
+  private lastKind: TransportKind | null = null;
 
   aboutToAppear(): void {
     this.init();
@@ -108,6 +117,8 @@ struct ConnectPage {
       const settings: Settings = store.load();
       this.host = settings.host;
       this.portText = settings.port > 0 ? `${settings.port}` : '';
+      this.pairedHost = settings.host;
+      this.pairedPort = settings.port;
       this.fingerprint = settings.fingerprintHex;
       this.mode = settings.transportMode;
       const deviceId = await store.deviceId();
@@ -167,6 +178,7 @@ struct ConnectPage {
 
   handleConfig(config: SessionConfig): void {
     Runtime.config = config;
+    this.autoStage = 0;
     Runtime.hasConfig = true;
     Runtime.stats.setCodecLabel('HW');
     Runtime.onConfig(config);
@@ -182,6 +194,22 @@ struct ConnectPage {
     Runtime.closedReason = reason;
     this.status = reason;
     this.busy = false;
+    // AUTO 降级：USB 不通试 Wi-Fi，Wi-Fi 不通试 TCP；TCP 失败就停在连接页
+    if (this.mode === TransportMode.AUTO && this.lastKind !== null &&
+      this.lastKind !== TransportKind.TCP && this.autoStage < 2) {
+      this.autoStage = this.lastKind === TransportKind.USB ? 1 : 2;
+      this.usbWanted = false;
+      this.stopUsbWait();
+      hilog.info(DOMAIN, TAG, 'auto fallback stage %{public}d after: %{public}s',
+        this.autoStage, reason);
+      Runtime.onClosed(reason);
+      // 串流页还在栈顶时，Runtime.onClosed 会把它弹回本页，而它的 aboutToDisappear
+      // 会 stop 当前会话；等出栈落定再建新会话，否则新连接会被那一下 stop 掐掉
+      setTimeout(() => {
+        this.connect(true);
+      }, 50);
+      return;
+    }
     if (this.usbWanted && shouldWaitForUsb(reason)) {
       this.startUsbWait();
     } else if (this.usbWanted && reason.indexOf('USB 权限') < 0 && reason.indexOf('USB 授权') < 0) {
@@ -201,6 +229,8 @@ struct ConnectPage {
     this.host = payload.host;
     this.portText = `${payload.port}`;
     this.fingerprint = payload.fingerprintHex;
+    this.pairedHost = payload.host;
+    this.pairedPort = payload.port;
     this.status = `已导入 ${payload.name}`;
     const store = this.store;
     if (store !== null) {
@@ -210,7 +240,18 @@ struct ConnectPage {
     }
   }
 
-  private discover(): void {
+  // 系统扫码 UI 自带相机权限，不需要 App 声明 CAMERA
+  private scanPairing(): void {
+    const context = getContext(this) as common.UIAbilityContext;
+    scanBarcode.startScanForResult(context).then((result: scanBarcode.ScanResult) => {
+      this.pairingUrl = result.originalValue;
+      this.applyPairing();
+    }).catch((err: Error) => {
+      hilog.warn(DOMAIN, TAG, 'scan failed: %{public}s', err.message);
+    });
+  }
+
+  private discover(auto: boolean = false): void {
     if (this.discovery !== null) {
       return;
     }
@@ -222,7 +263,12 @@ struct ConnectPage {
       if (this.discovery === discovery) {
         discovery.stop();
         this.discovery = null;
-        this.status = '未发现 Mac，可手动填写或扫码';
+        if (auto) {
+          this.status = '未发现 Mac，改用 TCP 通道…';
+          this.connect();
+        } else {
+          this.status = '未发现 Mac，可手动填写或扫码';
+        }
       }
     }, 5000);
     discovery.start((mac: DiscoveredMac) => {
@@ -235,6 +281,7 @@ struct ConnectPage {
         this.status = `发现 ${mac.name}，自动连接…`;
         this.connect();
       } else {
+        this.autoDiscoveryTried = false;
         this.status = `发现 ${mac.name}，需扫码确认指纹`;
       }
     }, (message: string) => {
@@ -242,38 +289,61 @@ struct ConnectPage {
       discovery.stop();
       this.discovery = null;
       this.status = message;
+      if (auto) {
+        this.connect();
+      }
     });
   }
 
   private selectMode(mode: TransportMode): void {
     this.usbWanted = false;
     this.stopUsbWait();
+    this.autoStage = 0;
     this.mode = mode;
     if (mode === TransportMode.WIFI) {
       this.portText = '7778';
     } else if (mode === TransportMode.TCP) {
       this.portText = '7777';
     } else if (mode === TransportMode.AUTO) {
-      this.portText = '';
+      // AUTO 自己有判定顺序，别把已配对/已扫码的地址端口抹掉
+      this.host = this.pairedHost;
+      this.portText = this.pairedPort > 0 ? `${this.pairedPort}` : '';
     }
   }
 
-  private connect(): void {
-    if (this.busy) {
+  private connect(fromFallback: boolean = false): void {
+    if (this.busy || this.discovery !== null) {
       return;
+    }
+    if (!fromFallback) {
+      this.autoStage = 0;
     }
     this.stopUsbWait();
     const host = this.host.trim();
     const port = Number(this.portText.trim());
-    const choice = selectTransport(
-      this.mode,
-      hasUsbAccessory(new SystemUsbPort()),
-      host,
-      Number.isFinite(port) ? port : 0);
+    const auto = this.mode === TransportMode.AUTO;
+    let choice: TransportChoice | null;
+    if (auto && this.autoStage >= 2) {
+      choice = new TransportChoice(TransportKind.TCP, '127.0.0.1', 7777);
+    } else {
+      choice = selectTransport(
+        this.mode,
+        hasUsbAccessory(new SystemUsbPort()) && !(auto && this.autoStage >= 1),
+        host,
+        Number.isFinite(port) ? port : 0);
+    }
     if (choice === null) {
       this.status = '请填写主机与端口';
       return;
     }
+    // AUTO 且没有 USB 配件、也没有已配置地址时，先发现一次 Wi-Fi，找不到再回退 TCP
+    if (auto && this.autoStage === 0 && choice.kind === TransportKind.TCP && !this.autoDiscoveryTried) {
+      this.autoDiscoveryTried = true;
+      this.discover(true);
+      return;
+    }
+    this.autoDiscoveryTried = false;
+    this.lastKind = choice.kind;
     if (choice.kind === TransportKind.WAIT_USB) {
       this.usbWanted = true;
       this.busy = false;
@@ -318,8 +388,10 @@ struct ConnectPage {
     Runtime.session = session;
 
     const store = this.store;
-    if (store !== null) {
-      store.savePairing(host, choice.port > 0 ? choice.port : 0, this.fingerprint).catch((err: Error) => {
+    if (store !== null && choice.kind === TransportKind.WIFI) {
+      this.pairedHost = host;
+      this.pairedPort = choice.port;
+      store.savePairing(host, choice.port, this.fingerprint).catch((err: Error) => {
         hilog.warn(DOMAIN, TAG, 'save host failed: %{public}s', err.message);
       });
     }
@@ -329,6 +401,8 @@ struct ConnectPage {
   private disconnect(): void {
     this.usbWanted = false;
     this.stopUsbWait();
+    this.autoStage = 0;
+    this.lastKind = null;
     const session = Runtime.session;
     if (session !== null) {
       session.stop();
@@ -440,7 +514,10 @@ struct ConnectPage {
           })
         Button('扫码')
           .fontSize(14)
-          .enabled(false)
+          .enabled(!this.busy)
+          .onClick(() => {
+            this.scanPairing();
+          })
       }
 
       Row({ space: 12 }) {
