@@ -177,7 +177,7 @@ Android 版的状态散落在 Activity 字段与回调里。鸿蒙版把它抽�
 | `retry` | Recovering | Selecting | `connect(isReconnect=true)` |
 | `manualDisconnect` | 任意 | Stopped | 停止重连、释放一切 |
 | `transportChanged` | Streaming | Selecting | 关闭旧会话，按新模式重连 |
-| `rotationChanged` | Streaming | Streaming（重配置） | 重发 HELLO（新宽高/旋转）→ 等新 SESSION_CONFIG → 重建解码器与 surface；不拆连接 |
+| `rotationChanged` | Streaming | Recovering（服务端重启） | 重发 HELLO（新宽高/旋转）；helper 为重建虚拟屏会 execv 自重启，连接短暂断开后由自动重连恢复，收到新 SESSION_CONFIG 时重建解码器 |
 | `usbDetached`（轮询发现） | Streaming(USB) | Recovering | 若模式为 USB 且无 accessory："USB 已断开，请重新插入" |
 | `appPaused` | Streaming | Streaming | 隐藏键盘、`releaseAll` 输入（不断流、不保活）；回前台若 lived 超时则按 `closed("连接无响应")` 处理 |
 
@@ -295,7 +295,8 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 
 - **连接页**：状态文案、连接/断开、AUTO/Wi-Fi/TCP/USB 模式切换、发现 Mac、扫码配对、手动地址、配对链接粘贴；连接中禁用按钮、显示进度。
 - **配对入口**：粘贴配对链接与扫码都可用。扫码用 `@kit.ScanKit` 的 `scanBarcode.startScanForResult`，系统扫码 UI 自带相机权限，App 不声明 CAMERA（已在本机验证，§16 #5）。
-- **播放页**：全屏视频 + 右下角齿轮吸附的工具条（调试/输入/键盘/断开 + X 收回）；无返回按钮，退出走工具条「断开」。调试浮层默认关闭，打开后显示在**左上角**（不再放左下角）。
+- **播放页**：全屏视频 + 右下角齿轮吸附的工具条（调试/输入/键盘/断开 + X 收回）；无返回按钮，退出走工具条「断开」。调试浮层默认关闭，打开后显示在**左上角**。
+- **旋转**：`display.on('change')` 在真机不回调，改用 `window.on('windowSizeChange')` 检测；取 `getDefaultDisplaySync()` 的新宽高/旋转，尺寸有变化才重发 HELLO（避免服务端被无效重配拖慢）。helper 为重建虚拟屏会自重启，客户端在等待窗口内自动重连，收到新 SESSION_CONFIG 后重建解码器，画面方向跟随设备。
 - **持久化**（preferences，键名沿用 Android 并新增 UI 项）：`host`、`port`、`fingerprint`、`device_id`、`transportMode`、`debugOn`、`inputOn`。传输模式与手填地址在下次启动恢复；调试信息与输入开关作为用户选择持久化（不再每次配置强制打开），键盘开关刻意不持久化。配对地址只在 **Wi-Fi 连接成功时**回写，USB/TCP 连接不会冲掉已配对地址。
 - **HELLO 设备信息**：屏幕像素宽高、DPI、刷新率、旋转、`deviceInfo.productModel`；每次连接与每次旋转后重建（重连流程）。
 
@@ -324,7 +325,7 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 | H2 | UDP（native 收包 + NDK AES-GCM + 重组/NACK）+ FEEDBACK | 弱网下自动回退、断电重连、连续 30min 不断流 | FEEDBACK 完成；UDP 未实现 |
 | H3 | 输入：触控/手势/键盘/笔 + 服务端门控 + 控制抽屉 | 与 Android 端行为逐项对照通过 | 完成 |
 | H4 | USB AOA 传输接入（native fd + ArkTS 拆帧）+ AUTO 降级 + 热插拔恢复 | 本机 USB 路径 ≤50ms p95，拔插可恢复 | 完成：USB 授权/拒绝/拔插恢复/AUTO 优先/断开停轮询均真机通过；USB p95 20–30ms 常态（偶发关键帧尖峰）。AUTO 支持插线自动回切 USB |
-| H5 | 旋转重配置、开源发布：README、LICENSE、仓库清理、Release 构建说明 | 全新机器按 README 能构建并连上 | 未开始 |
+| H5 | 旋转重配置、开源发布：README、LICENSE、仓库清理、Release 构建说明 | 全新机器按 README 能构建并连上 | 完成：旋转经 windowSizeChange 检测并自动恢复（真机验收）；README/LICENSE/图标脚本/探针清理完成 |
 
 每个阶段结束在 WEB-W00 上真机验收，指标记入 `docs/`。Wi-Fi 实测：修复 TLS 1.3 收包停顿后，静止画面 P 帧 e2e 6–42ms；持续画面变化时由 FEEDBACK 驱动 Mac 降码率。
 
@@ -357,6 +358,6 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 | 3 | native UDP 收包 + NDK AES-GCM 能否跟上 25Mbps（≈2600 包/秒） | H2 满速实测丢包率与 CPU 占用 | 未开始（H2） |
 | 4 | 隐藏 TextInput 的软键盘文本差量行为 | H3 中文输入、退格、回车 | 已实现（H3） |
 | 5 | 扫码能否在 WEB-W00 + 自动签名下直接调起（是否依赖 AGC 配置） | 真机点击扫码 | 已验证：`@kit.ScanKit` 系统扫码 UI 可直接调起，不依赖 AGC，App 无需 CAMERA |
-| 6 | 旋转时画面恢复的交互 | 前后旋转各 3 次 | 已验证：旋转触发页面重建 → 新 surface + 解码器重开；未实现同连接重发 HELLO |
+| 6 | 旋转时画面恢复的交互 | 前后旋转各 3 次 | 已验证（2026-11-18）：windowSizeChange → 重发 HELLO → 服务端重建虚拟屏 → 自动重连并按新尺寸重建解码器 |
 | 7 | 其他机型（手机/不同芯片）兼容性 | 社区反馈或自备设备 | 待社区 |
-| 8 | HarmonyOS TLS 1.3 大帧收包停顿 | TLS 1.2 / 1.3 对比实测 | 已验证：1.3 在一个 16KB 记录后停顿数秒；固定 1.2 后 16KB 记录 33ms 内到齐 |
+| 8 | HarmonyOS TLS 1.3 大帧收包停顿 | TLS 1.2 / 1.3 对比实测 | 已验证（初始）：1.3 在一个 16KB 记录后停顿数秒；固定 1.2 后 16KB 记录 33ms 内到齐。2026-11-18 复测未能复现（链路波动/静态画面），维持 1.2 |

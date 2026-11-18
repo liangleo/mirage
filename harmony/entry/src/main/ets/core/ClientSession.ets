@@ -131,6 +131,27 @@ export class ClientSession {
     this.send(encodeCtrl(CtrlCode.REQUEST_KEYFRAME));
   }
 
+  // 旋转：更新 HELLO 里的屏幕尺寸并立即重发。Mac 端收到新尺寸会重启 helper
+  // 重建虚拟屏，连接会断开；这里保持 hello 为最新值，自动重连时直接沿用。
+  updateScreen(width: number, height: number, rotation: number): void {
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    // display 的 change 事件不只旋转会触发；尺寸和旋转都没变就不重发 HELLO，
+    // 否则服务端会不停做会话重配，视频通道被拖死。
+    if (this.hello.screenWidth === Math.min(65535, width) &&
+      this.hello.screenHeight === Math.min(65535, height) &&
+      this.hello.rotation === rotation) {
+      return;
+    }
+    this.hello.screenWidth = Math.min(65535, width);
+    this.hello.screenHeight = Math.min(65535, height);
+    this.hello.rotation = rotation;
+    if (this.connected) {
+      this.send(encodeHello(this.hello));
+    }
+  }
+
   setInputEnabled(enabled: boolean): void {
     this.gate.setLocalEnabled(enabled);
     if (!enabled) {

@@ -1,4 +1,4 @@
-import { router } from '@kit.ArkUI';
+import { display, router } from '@kit.ArkUI';
 import { window } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { closeDecoder, DecoderEvent, onEvent, openDecoder, submitVideo } from 'libmirage.so';
@@ -54,10 +54,38 @@ struct StreamPage {
   private waitDeadlineMs: number = 0;
   private waitTimer: number = -1;
   private confirmTimer: number = -1;
+  private sizeListener: ((size: window.Size) => void) | null = null;
+  private streamWindow: window.Window | null = null;
 
   aboutToAppear(): void {
     this.ownedSession = Runtime.session;
     this.applyWindow(true);
+    // 旋转检测：display.on('change') 在真机上不回调，用窗口尺寸变化
+    this.sizeListener = (size: window.Size): void => {
+      const session = Runtime.session;
+      if (session === null) {
+        return;
+      }
+      try {
+        const d = display.getDefaultDisplaySync();
+        hilog.info(DOMAIN, TAG, 'window size %{public}dx%{public}d display %{public}dx%{public}d rot=%{public}d',
+          size.width, size.height, d.width, d.height, d.rotation);
+        session.updateScreen(d.width, d.height, d.rotation);
+      } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'display query failed: %{public}s', (err as Error).message);
+      }
+    };
+    const host = this.getUIContext().getHostContext();
+    if (host !== null) {
+      window.getLastWindow(host).then((win: window.Window) => {
+        this.streamWindow = win;
+        if (this.sizeListener !== null) {
+          win.on('windowSizeChange', this.sizeListener);
+        }
+      }).catch((err: Error) => {
+        hilog.warn(DOMAIN, TAG, 'window listener failed: %{public}s', err.message);
+      });
+    }
     onEvent((event: DecoderEvent) => {
       if (event.kind === 'frame') {
         this.decodedFrames += 1;
@@ -73,9 +101,15 @@ struct StreamPage {
       Runtime.hasConfig = true;
       this.ownedSession = Runtime.session;
       this.clearWait();
+      // 旋转后服务端按新尺寸重建，解码器必须跟着重开
+      const resized = this.decoderOpen &&
+        (config.width !== this.configWidth || config.height !== this.configHeight);
       this.configWidth = config.width;
       this.configHeight = config.height;
       this.statusText = '';
+      if (resized) {
+        this.stopDecoder();
+      }
       this.applyInputCaps();
       this.startDecoder();
     };
@@ -117,6 +151,15 @@ struct StreamPage {
   }
 
   aboutToDisappear(): void {
+    if (this.streamWindow !== null && this.sizeListener !== null) {
+      try {
+        this.streamWindow.off('windowSizeChange', this.sizeListener);
+      } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'window off failed: %{public}s', (err as Error).message);
+      }
+    }
+    this.sizeListener = null;
+    this.streamWindow = null;
     this.applyWindow(false);
     Runtime.onVideo = (frame: VideoFrame) => {
     };

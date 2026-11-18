@@ -1,8 +1,8 @@
 # Mirage
 
-把 Android 平板/手机变成 Mac 的扩展屏或镜像屏。
+把 Android 平板/手机（以及鸿蒙平板/手机）变成 Mac 的扩展屏或镜像屏。
 
-当前阶段：M0–M1（镜像显示，不做输入）。设计与计划见 `docs/`（过程文档，验收后统一提交）。
+支持 Wi-Fi（TLS + 指纹固定）与 USB AOA 两条通道、触控/键盘/手写笔输入、断线自动重连与自适应码率；鸿蒙侧为原生 ArkTS 客户端。MIT 许可开源。设计与计划见 `docs/`。
 
 ## 常用命令（Makefile）
 
@@ -15,9 +15,21 @@ make run       # 打开打包好的 App
 make connect   # adb 连接 Android 设备并设置 reverse
 make install   # 安装 App 到 /Applications，并安装 APK 到设备
 make clean     # 清理构建产物
+
+make build.harmony   # 构建鸿蒙 HAP
+make install.hap     # 安装 HAP 到已连接的鸿蒙设备
+make test.harmony    # 在鸿蒙设备上跑客户端单测
 ```
 
 `make help` 查看全部命令；`INSTALL_DIR=~/Applications make install` 可改安装位置。
+
+## 发布构建
+
+- **Mac**：`make app` 生成 `build/.Mirage.app`，`make install.mac` 安装到 `/Applications`。默认用本机 Apple Development 证书签名；首次运行需授予「屏幕录制」，USB 输入需授予「辅助功能」。
+- **鸿蒙**：用 DevEco Studio 打开 `harmony/`，使用自己的华为账号自动签名（`harmony/build-profile.json5` 中的 `signingConfigs` 因机器而异，**不要提交**），随后 `make build.harmony`。产物为 `harmony/entry/build/default/outputs/default/entry-default-signed.hap`。
+- **Android**：`cd android && ./gradlew :app:assembleDebug`（或 `assembleRelease`，需自备签名配置）。
+- **图标**：`python3 tools/extract_icons.py assets/icon/source/contact_sheet.png assets/icon` 从总表切图，`python3 tools/gen_extra_icons.py assets/icon` 生成调试/齿轮/关闭图标（依赖 Pillow）。
+- 发布前跑一遍 `make test` 与 `make test.harmony`。
 
 ## 开发工具（Skills / MCP）
 
@@ -169,8 +181,13 @@ make test.harmony    # 构建 ohosTest HAP 并在设备上跑单测
 - 连接方式与 Android 客户端一致：AUTO / Wi-Fi / TCP / USB 四种通道。AUTO 在检测到 Mirage USB 配件时优先走 USB，否则退回 mDNS 发现的 Wi-Fi；Wi-Fi 填了 64 位十六进制指纹走 TLS，否则明文连 TCP 端口。点「发现 Mac」用 mDNS 自动填地址。
 - TCP 模式（USB 调试通道）需要先 `make connect.harmony` 做 hdc 端口反向转发。
 - 连接后右下角有齿轮按钮：点开是 调试 / 输入 / 键盘 / 断开 四枚按钮，底部 X 收回；白 = 开启、灰 = 关闭，断开为灰→红两击确认。
-- **USB 为实验特性**，需要 Mac 端 AOA 桥：菜单栏 App 打开「USB 免调试连接（AOA）」，或手动运行 `build/aoa_bridge --port 7777`（此时 helper 以 `--mode extend --port 7777` 的 loopback 模式启动）。
+- 旋转屏幕会自动上报新尺寸：Mac 重建对应方向的虚拟屏，客户端自动重连并恢复画面，无需手动断开。
+- **USB 为实验特性**，需要 Mac 端 AOA 桥：开启菜单栏 App 的「服务」即同时提供 USB 与 Wi-Fi；也可手动运行 `build/aoa_bridge --port 7777`（此时 helper 以 `--mode extend --port 7777` 的 loopback 模式启动）。
 - 首次 USB 连接会弹系统授权，需同意；拒绝后本次会话停止重试，重新点「连接」可再试。
 - 部分厂商 ROM 的 accessory 通道可能不通，此时回退 Wi-Fi 使用。
 - 拔出 USB 后提示「USB 已断开，请重新插入」，App 每秒检查一次配件列表，重新插线自动恢复；点「断开」立即停止等待。
 - 构建与真机测试的详细环境变量见 `harmony/TESTING.md`。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。
