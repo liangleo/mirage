@@ -37,6 +37,9 @@ public final class HelperApp: @unchecked Sendable {
     private let recordPath: String?
     private var recordHandle: FileHandle?
     private var virtualDisplay: VirtualDisplay?
+    private var activeDisplayID: CGDirectDisplayID = 0
+    private var activeCaptureSize: CaptureSize?
+    private var captureRecoveries = 0
 
     private let keyframes = KeyframeController()
     private let statsLock = NSLock()
@@ -183,28 +186,10 @@ public final class HelperApp: @unchecked Sendable {
             server?.broadcast(frame)
         }
 
-        let capture = DisplayCapture(displayID: targetDisplayID, fps: fps, size: size) { [weak self] pixelBuffer, micros in
-            guard let self, let encoder = self.encoder else { return }
-            self.dumpFirstFrameIfNeeded(pixelBuffer)
-            let forceKeyframe = self.keyframes.shouldForce(nowMicros: micros)
-            let pts = CMTime(value: Int64(micros), timescale: 1_000_000)
-            do {
-                try encoder.encode(pixelBuffer, pts: pts, forceKeyframe: forceKeyframe)
-            } catch {
-                print("encode_error=\(error)")
-            }
-        }
+        self.activeDisplayID = targetDisplayID
+        self.activeCaptureSize = size
+        let capture = buildCapture(size: size)
         self.capture = capture
-        // 系统停止共享（菜单栏「停止共享」等）后 helper 已无可服务的内容，自行退出，
-        // 否则菜单一直显示运行中、录制指示灯也不会灭
-        capture.onStop = { [weak self] in
-            print("helper_stopped=capture")
-            fflush(stdout)
-            Task {
-                await self?.stop()
-                exit(0)
-            }
-        }
 
         try await capture.start()
         try server.start()
@@ -258,6 +243,75 @@ public final class HelperApp: @unchecked Sendable {
         controlServer = nil
         virtualDisplay?.destroy()
         virtualDisplay = nil
+    }
+
+    private func buildCapture(size: CaptureSize?) -> DisplayCapture {
+        let capture = DisplayCapture(displayID: activeDisplayID, fps: fps, size: size) { [weak self] pixelBuffer, micros in
+            guard let self, let encoder = self.encoder else { return }
+            self.dumpFirstFrameIfNeeded(pixelBuffer)
+            let forceKeyframe = self.keyframes.shouldForce(nowMicros: micros)
+            let pts = CMTime(value: Int64(micros), timescale: 1_000_000)
+            do {
+                try encoder.encode(pixelBuffer, pts: pts, forceKeyframe: forceKeyframe)
+            } catch {
+                print("encode_error=\(error)")
+            }
+        }
+        // 系统停止共享（菜单栏「停止共享」等）后 helper 已无可服务的内容，自行退出；
+        // 但若只是显示器被重建/消失（-3815，auto-size execv 后偶发），重建后再试。
+        capture.onStop = { [weak self] in
+            self?.handleCaptureStopped()
+        }
+        return capture
+    }
+
+    private func handleCaptureStopped() {
+        let code = capture?.lastStopCode ?? 0
+        if code == -3815 && captureRecoveries < 2 {
+            captureRecoveries += 1
+            print("capture_lost code=\(code); restarting attempt=\(captureRecoveries)")
+            fflush(stdout)
+            Task { await self.recoverCapture() }
+            return
+        }
+        print("helper_stopped=capture")
+        fflush(stdout)
+        Task {
+            await self.stop()
+            exit(0)
+        }
+    }
+
+    private func recoverCapture() async {
+        try? await capture?.stop()
+        capture = nil
+        if mode == .extend {
+            virtualDisplay?.destroy()
+            virtualDisplay = nil
+            activeDisplayID = (try? makeVirtualDisplay()) ?? displayID
+        }
+        guard let capturedSize = captureSize(for: activeDisplayID) else {
+            print("capture_restart_failed=no_display")
+            fflush(stdout)
+            await stop()
+            exit(0)
+        }
+        let effectiveMaxWidth = autoSize ? max(maxWidth, 4096) : maxWidth
+        let effectiveMaxHeight = autoSize ? max(maxHeight, 4096) : maxHeight
+        let size = fittedCaptureSize(capturedSize, maxWidth: effectiveMaxWidth, maxHeight: effectiveMaxHeight)
+        activeCaptureSize = size
+        let newCapture = buildCapture(size: size)
+        capture = newCapture
+        do {
+            try await newCapture.start()
+            newCapture.requestFrame()
+            print("capture_restarted display=\(activeDisplayID) size=\(size.width)x\(size.height)")
+            fflush(stdout)
+        } catch {
+            print("capture_restart_failed=\(error)")
+            fflush(stdout)
+            handleCaptureStopped()
+        }
     }
 
     private func makeVirtualDisplay() throws -> CGDirectDisplayID {

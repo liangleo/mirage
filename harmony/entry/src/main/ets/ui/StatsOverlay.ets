@@ -29,7 +29,8 @@ export struct StatsOverlay {
     const rtt = snap.rttMs >= 0 ? `${snap.rttMs}ms` : '--';
     this.line1 = `${snap.fps} fps · ${snap.bitrateMbps.toFixed(1)} Mbps · drop ${snap.dropped}${p95}`;
     this.line2 = `decode ${snap.decodeMs.toFixed(1)}ms · e2e ${e2e} · RTT ${rtt} · ${snap.codec}`;
-    this.transport = Runtime.transportName;
+    const resolution = Runtime.hasConfig ? `${Runtime.config.width}×${Runtime.config.height}` : '';
+    this.transport = resolution.length > 0 ? `${Runtime.transportName} ${resolution}` : Runtime.transportName;
   }
 
   build() {
@@ -42,7 +43,7 @@ export struct StatsOverlay {
       .width('100%')
       Text(this.line2).fontSize(13).fontColor('#BBBBBB')
     }
-    .width(360)
+    .width(420)
     .alignItems(HorizontalAlign.Start)
     .padding({ left: 14, right: 14, top: 8, bottom: 8 })
     .backgroundColor('#66000000')

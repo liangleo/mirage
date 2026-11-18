@@ -15,6 +15,8 @@ public final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// Fired when the system stops the stream (e.g. the menu bar's "stop
     /// sharing"); the helper has nothing left to serve and should exit.
     public var onStop: (@Sendable () -> Void)?
+    /// 最近一次被系统停止时的错误码；helper 用它区分「用户停止共享」与「显示器消失」。
+    public private(set) var lastStopCode: Int?
 
     private let displayID: CGDirectDisplayID
     private let fps: Int
@@ -76,6 +78,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @
     }
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
+        lastStopCode = (error as NSError).code
         print("capture stopped: \(error)")
         fflush(stdout)
         onStop?()
