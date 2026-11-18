@@ -1,10 +1,10 @@
 # Mirage 鸿蒙原生客户端设计
 
-版本：v1.2（2026-11-17，实现收尾同步：AUTO 回切 USB、统一重连、FEEDBACK、Mac 服务模型；H2 UDP 仍待实现）
+版本：v1.3（2026-11-18，H5：旋转自动恢复、开源收尾；H2 UDP 仍待实现）
 上位设计：[Mirage 设计文档](2026-11-13-mirage-design.md)（协议、Mac 端、验收标准以该文档为准，本文只写客户端差异）
 输入协议：[M5 输入回传设计](2026-11-14-mirage-input-design.md)
 
-**实现状态**：H1（Wi-Fi TCP/TLS 出画面）、H3（输入与控制工具条）、H4（USB AOA + AUTO 降级）已落地；FEEDBACK（10Hz 接收状态上报）已实现并驱动 Mac 端自适应码率；H2 的 UDP 视频仍未实现——客户端解析到 `UDP_CONFIG` 后忽略，Mac 端在收不到 UDP 握手前继续走 TCP。本轮另有三处平台经验固化：TLS 固定 1.2、AUTO 插线自动回切 USB、Mac 服务开启即同时提供 USB + Wi-Fi（运行中经回环控制通道启停，不重启捕获）。正文已按实到代码修订。
+**实现状态**：H1（Wi-Fi TCP/TLS 出画面）、H3（输入与控制工具条）、H4（USB AOA + AUTO 降级）已落地；FEEDBACK（10Hz 接收状态上报）已实现并驱动 Mac 端自适应码率；H2 的 UDP 视频仍未实现——客户端解析到 `UDP_CONFIG` 后忽略，Mac 端在收不到 UDP 握手前继续走 TCP。另有平台经验固化：TLS 固定 1.2、AUTO 插线自动回切 USB、Mac 服务开启即同时提供 USB + Wi-Fi（运行中经回环控制通道启停，不重启捕获）；旋转经 `window.on('windowSizeChange')` 检测并自动恢复。H5 已收尾：README/LICENSE/图标脚本/探针清理，正文已按实到代码修订。
 
 ---
 

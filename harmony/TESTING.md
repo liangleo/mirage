@@ -2,6 +2,8 @@
 
 所有命令在仓库根目录执行。设备串号见 `hdc list targets`（模拟器 `127.0.0.1:5555`，真机 Wi-Fi 串号 `192.168.10.149:8710`）。
 
+**优先用 Wi-Fi 跑 hdc**：`"$HDC" tconn 192.168.10.149:8710` 之后所有命令照常。USB 线一旦让 Mirage 进入 AOA 配件模式，hdc 会变成 Offline/消失（`ioreg` 里是 `HDC Device` / `0x2D00`），插拔也未必恢复；只有调试 USB/AOA 本身时才用数据线。
+
 ## 常量
 
 ```bash
@@ -124,12 +126,22 @@ E2E（模拟器原生 2880×1920，视频铺满时）：
 "$HDC" -t "$DEV" shell "uitest uiInput click 1440 960"          # 单击
 "$HDC" -t "$DEV" shell "uitest uiInput drag 1200 900 1700 900"  # 拖动
 "$HDC" -t "$DEV" shell "uitest uiInput longClick 1440 960"      # 长按 → 右键（buttons=2）
-"$HDC" -t "$DEV" shell "uitest uiInput drag 2820 960 2300 960"  # 右缘滑动 → 打开抽屉
-"$HDC" -t "$DEV" shell "uitest uiInput click 2700 960"          # 右缘条带内单击 → 仍应发送 input_pointer
+"$HDC" -t "$DEV" shell "uitest uiInput click 2820 1840"         # 右下角齿轮 → 展开工具条
+"$HDC" -t "$DEV" shell "uitest uiInput click 2820 455"          # 工具条底部 X → 收回齿轮
 "$HDC" -t "$DEV" shell "uitest uiInput keyEvent 2017"           # 硬件键 A
 "$HDC" -t "$DEV" shell "uitest uiInput keyEvent 2055"           # 退格 → DEL down/up
 ```
 
-客户端侧协议校验（无需辅助功能）：在 Mac 上运行 `mirage-helper --serve-selftest --tls --seconds 300`，客户端手动连接 Wi-Fi 7778；日志出现 `input_pointer kinds=1/2/3`、`input_key`、`input_text`、`input_release_all` 即表示采集与映射正确。抽屉里打开键盘后，软键盘按键走 IME 文本路径（`input_text text=a` 等，每次只发一次）；关闭键盘后硬件键走 KEY 路径（含 unicode）。
+客户端侧协议校验（无需辅助功能）：在 Mac 上运行 `mirage-helper --serve-selftest --tls --seconds 300`，客户端手动连接 Wi-Fi 7778；日志出现 `input_pointer kinds=1/2/3`、`input_key`、`input_text`、`input_release_all` 即表示采集与映射正确。工具条里打开键盘后，软键盘按键走 IME 文本路径（`input_text text=a` 等，每次只发一次）；关闭键盘后硬件键走 KEY 路径（含 unicode）。
 
 待真机验证：双指滚动/捏合（模拟器只能注入单点）、中文 IME 组合输入（`uitest uiInput inputText` 的粘贴路径不会提交到隐藏 TextInput，仅单测覆盖 UTF-8）、橡皮擦（ArkUI 无橡皮擦信号，按笔处理）。
+
+## 旋转（H5）
+
+物理旋转平板后，日志应出现 `window size ... display ... rot=`；客户端重发 HELLO，helper 重建虚拟屏（自身 execv 重启），App 在等待窗口内自动重连并按新尺寸重建解码器。预期：短暂“连接中断，正在重连”后自动恢复，画面方向跟随设备、无上下黑边。
+
+```bash
+"$HDC" -t "$DEV" shell "hilog -x" | grep -E "window size|decoder opened|MirageSession"
+```
+
+注意：`display.on('change')` 在本机不回调，旋转检测走 `window.on('windowSizeChange')`。
