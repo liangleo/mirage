@@ -488,6 +488,9 @@ final class HelperController: ObservableObject {
 
     private var process: Process?
     private var externalHelperPID: pid_t?
+    // 刚被 stop() 终止的 helper：端口释放前不能当成外部 helper 接管，否则
+    // 既不会拉起新的 helper，也不会启动 AOA 桥（USB 会一直连不上）
+    private var stoppingPIDs: Set<pid_t> = []
     private var bridgeProcess: Process?
     private var bridgeStartedAt: Date?
     private var bridgeRestarts = 0
@@ -551,10 +554,12 @@ final class HelperController: ObservableObject {
                 externalHelperPID = pid
                 isRunning = true
                 status = "运行中（已有 helper）"
+                startUsbBridge()
             }
         } else if externalHelperPID != nil {
             externalHelperPID = nil
             isRunning = false
+            stopUsbBridge()
             status = "已停止"
         }
     }
@@ -585,6 +590,11 @@ final class HelperController: ObservableObject {
     }
 
     private func listeningHelperPID() -> pid_t? {
+        guard let pid = rawListeningHelperPID(), !stoppingPIDs.contains(pid) else { return nil }
+        return pid
+    }
+
+    private func rawListeningHelperPID() -> pid_t? {
         let lsof = Process()
         lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
         lsof.arguments = ["-ti", "tcp:7777", "-sTCP:LISTEN"]
@@ -838,18 +848,32 @@ final class HelperController: ObservableObject {
         }
     }
 
-    func start() {
+    func start(waitRetries: Int = 10) {
         guard process == nil else { return }
         guard let helper = helperURL else {
             status = "找不到 mirage-helper"
             return
         }
 
-        if let pid = listeningHelperPID() {
+        if let pid = rawListeningHelperPID() {
+            if stoppingPIDs.contains(pid) {
+                // 旧 helper 还在退出、端口未释放：等它结束再启动，避免 bind 失败
+                guard waitRetries > 0 else {
+                    status = "等待旧 helper 退出超时，请重试"
+                    return
+                }
+                status = "等待旧 helper 退出…"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    self?.start(waitRetries: waitRetries - 1)
+                }
+                return
+            }
             externalHelperPID = pid
             isRunning = true
             status = "运行中（已有 helper）"
             applyWifiState()
+            // 服务 = 双通道：接管已有 helper 时同样要拉起 USB 桥
+            startUsbBridge()
             return
         }
 
@@ -946,10 +970,14 @@ final class HelperController: ObservableObject {
     /// SIGTERM lets the helper stop its capture stream and destroy the virtual
     /// display; SIGKILL would leave the screen-recording indicator lit.
     private func terminate(_ pid: pid_t) {
+        stoppingPIDs.insert(pid)
         kill(pid, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { [weak self] in
             if kill(pid, 0) == 0 {
                 kill(pid, SIGKILL)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self?.stoppingPIDs.remove(pid)
             }
         }
     }

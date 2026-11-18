@@ -268,6 +268,7 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 - 菜单只保留「开启/关闭服务」，不再有独立的 USB/Wi-Fi 开关：开启服务 = 拉起 helper + 开 Wi-Fi + 启动 AOA 桥；关闭服务 = 停桥 + 停 helper。
 - 运行中开关 Wi-Fi 走回环控制通道 `127.0.0.1:7779`（`wifi on|off|status`，一行命令一行应答），不重启捕获、虚拟显示器或 USB 会话。带 `--control-port` 启动的 helper 在就绪时直接开 Wi-Fi，避免菜单在启动窗口期抢时序失败。
 - AOA 桥常驻等待设备（无设备不退出）；服务开启时线没插也能在插入后自动切 AOA。
+- 服务停止后再开启必须恢复 USB：菜单记录刚被终止的 helper PID，`start()` 会先等端口释放再拉起新 helper，不再把正在退出的旧进程当成「已有 helper」接管；接管已有/外部 helper 时同样会启动 AOA 桥（服务 = 双通道）。
 - macOS 菜单栏「停止共享」会停掉 `SCStream`：helper 通过 `SCStreamDelegate.didStopWithError` 感知后自行退出，菜单显示「已停止」，同时停掉 AOA 桥（避免桥对着已死 helper 无限重连）。
 - 安全边界：控制端口只绑定回环；Wi-Fi 仍强制 TLS + 指纹固定，明文端口只绑定回环。
 
