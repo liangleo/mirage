@@ -32,6 +32,7 @@
 #define USB_BUFFER 16384
 
 static volatile sig_atomic_t stopping = 0;
+static volatile sig_atomic_t paused = 0;
 static volatile sig_atomic_t graceful_stop = 0;
 static libusb_context *usb_ctx = NULL;
 static libusb_device_handle *usb_handle = NULL;
@@ -224,7 +225,7 @@ static int write_all(int fd, const unsigned char *data, size_t length) {
 static void *usb_to_tcp(void *unused) {
     (void)unused;
     unsigned char buffer[USB_BUFFER];
-    while (!stopping) {
+    while (!stopping && !paused) {
         int transferred = 0;
         int rc = libusb_bulk_transfer(
             usb_handle, endpoint_in, buffer, sizeof(buffer), &transferred, 1000
@@ -251,7 +252,7 @@ static void *usb_to_tcp(void *unused) {
         }
         pthread_mutex_unlock(&tcp_lock);
     }
-    stopping = 1;
+    if (!paused) stopping = 1;
     pthread_mutex_lock(&tcp_lock);
     if (tcp_fd >= 0) shutdown(tcp_fd, SHUT_RDWR);
     pthread_mutex_unlock(&tcp_lock);
@@ -259,7 +260,7 @@ static void *usb_to_tcp(void *unused) {
 }
 
 static int connect_helper_with_retry(void) {
-    while (!stopping) {
+    while (!stopping && !paused) {
         int fd = connect_tcp(port_number);
         if (fd >= 0) {
             int one = 1;
@@ -280,7 +281,7 @@ static void *tcp_to_usb(void *unused) {
      * Exit so the supervisor re-does the AOA handshake for a fresh session. */
     int out_timeouts = 0;
 
-    while (!stopping) {
+    while (!stopping && !paused) {
         if (fd < 0) {
             fd = connect_helper_with_retry();
             if (fd < 0) break;
@@ -314,7 +315,7 @@ static void *tcp_to_usb(void *unused) {
         }
 
         size_t offset = 0;
-        while (offset < (size_t)read_count && !stopping) {
+        while (offset < (size_t)read_count && !stopping && !paused) {
             int transferred = 0;
             int rc = libusb_bulk_transfer(
                 usb_handle, endpoint_out, buffer + offset,
@@ -353,10 +354,56 @@ static void *tcp_to_usb(void *unused) {
     }
 
     if (fd >= 0) close(fd);
-    stopping = 1;
+    if (!paused) stopping = 1;
     pthread_mutex_lock(&tcp_lock);
     if (tcp_fd >= 0) shutdown(tcp_fd, SHUT_RDWR);
     pthread_mutex_unlock(&tcp_lock);
+    return NULL;
+}
+
+/* 控制通道：helper 在 Wi-Fi 客户端在线时发 pause，避免桥上电切走设备；
+ * AUTO 需要 USB 时发 resume；停止服务时发 stop。一行一条命令。 */
+static void *control_thread(void *unused) {
+    (void)unused;
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) return NULL;
+    int one = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(7780);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(listen_fd, 4) != 0) {
+        fprintf(stderr, "bridge control port 7780 unavailable (errno=%d)\n", errno);
+        close(listen_fd);
+        return NULL;
+    }
+    while (!stopping) {
+        struct pollfd pfd = {listen_fd, POLLIN, 0};
+        if (poll(&pfd, 1, 500) <= 0) continue;
+        int fd = accept(listen_fd, NULL, NULL);
+        if (fd < 0) continue;
+        char buffer[64];
+        memset(buffer, 0, sizeof(buffer));
+        ssize_t count = read(fd, buffer, sizeof(buffer) - 1);
+        close(fd);
+        if (count <= 0) continue;
+        if (strncmp(buffer, "pause", 5) == 0) {
+            paused = 1;
+            printf("bridge paused\n");
+            fflush(stdout);
+        } else if (strncmp(buffer, "resume", 6) == 0) {
+            paused = 0;
+            printf("bridge resumed\n");
+            fflush(stdout);
+        } else if (strncmp(buffer, "stop", 4) == 0) {
+            stopping = 1;
+            graceful_stop = 1;
+        }
+    }
+    close(listen_fd);
     return NULL;
 }
 
@@ -378,173 +425,189 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int version = 0;
-    libusb_device *device = NULL;
-    // 服务开启时线可能没插：常驻等设备，插上后自动切 AOA。
-    // 之前直接退出会让「插回数据线」永远等不到配件。
-    int announced = 0;
+    pthread_t control;
+    pthread_create(&control, NULL, control_thread, NULL);
+
+    int bye_sent = 0;
     while (!stopping) {
-        device = find_aoa_device(&version);
-        if (device != NULL) {
-            break;
-        }
-        if (!announced) {
-            fprintf(stderr, "waiting for AOA device\n");
-            announced = 1;
-        }
-        usleep(500000);
-    }
-    if (device == NULL) {
-        libusb_exit(usb_ctx);
-        return 1;
-    }
-
-    int preflight_fd = probe_tcp(port);
-    if (preflight_fd != 0) {
-        fprintf(stderr, "helper is not listening on 127.0.0.1:%d\n", port);
-        libusb_exit(usb_ctx);
-        return 1;
-    }
-
-    libusb_device *accessory = find_accessory_device();
-    int existing_accessory = accessory != NULL;
-    if (accessory == NULL) {
-        int version = 0;
-        libusb_device *device = find_aoa_device(&version);
-        if (device == NULL) {
-            fprintf(stderr, "no AOA device found\n");
-            libusb_exit(usb_ctx);
-            return 1;
+        if (paused) {
+            usleep(200000);
+            continue;
         }
 
-        if (libusb_open(device, &usb_handle) != 0) {
-            fprintf(stderr, "cannot open device\n");
-            libusb_unref_device(device);
-            libusb_exit(usb_ctx);
-            return 1;
-        }
-
-        int string_error = 0;
-        if (control_string(usb_handle, 0, "Mirage") < 0) string_error = 1;
-        if (control_string(usb_handle, 1, "Mirage Display") < 0) string_error = 1;
-        if (control_string(usb_handle, 2, "Mirage USB display") < 0) string_error = 1;
-        if (control_string(usb_handle, 3, "1") < 0) string_error = 1;
-        if (string_error) {
-            fprintf(stderr, "AOA string transfer failed\n");
+        libusb_device *accessory = find_accessory_device();
+        int existing_accessory = accessory != NULL;
+        if (accessory == NULL) {
+            int version = 0;
+            libusb_device *device = find_aoa_device(&version);
+            if (device == NULL) {
+                usleep(500000);
+                continue;
+            }
+            if (libusb_open(device, &usb_handle) != 0) {
+                fprintf(stderr, "cannot open device\n");
+                libusb_unref_device(device);
+                usleep(500000);
+                continue;
+            }
+            int string_error = 0;
+            if (control_string(usb_handle, 0, "Mirage") < 0) string_error = 1;
+            if (control_string(usb_handle, 1, "Mirage Display") < 0) string_error = 1;
+            if (control_string(usb_handle, 2, "Mirage USB display") < 0) string_error = 1;
+            if (control_string(usb_handle, 3, "1") < 0) string_error = 1;
+            if (string_error) {
+                fprintf(stderr, "AOA string transfer failed\n");
+                libusb_close(usb_handle);
+                usb_handle = NULL;
+                libusb_unref_device(device);
+                usleep(500000);
+                continue;
+            }
+            printf("switching device to accessory mode...\n");
+            fflush(stdout);
+            libusb_control_transfer(usb_handle, 0x40, AOA_START, 0, 0, NULL, 0, 1000);
             libusb_close(usb_handle);
+            usb_handle = NULL;
             libusb_unref_device(device);
-            libusb_exit(usb_ctx);
-            return 1;
+            if (wait_for_accessory(&accessory) != 0) {
+                fprintf(stderr, "accessory did not enumerate\n");
+                usleep(500000);
+                continue;
+            }
+        } else {
+            printf("using existing accessory\n");
+            fflush(stdout);
         }
 
-        printf("switching device to accessory mode...\n");
+        if (paused || stopping) {
+            libusb_unref_device(accessory);
+            continue;
+        }
+
+        if (probe_tcp(port_number) != 0) {
+            fprintf(stderr, "helper is not listening on 127.0.0.1:%d\n", port_number);
+            libusb_unref_device(accessory);
+            usleep(500000);
+            continue;
+        }
+
+        if (libusb_open(accessory, &usb_handle) != 0) {
+            fprintf(stderr, "cannot open accessory\n");
+            libusb_unref_device(accessory);
+            usleep(500000);
+            continue;
+        }
+        if (libusb_claim_interface(usb_handle, 0) != 0) {
+            fprintf(stderr, "cannot claim accessory interface\n");
+            libusb_close(usb_handle);
+            usb_handle = NULL;
+            libusb_unref_device(accessory);
+            usleep(500000);
+            continue;
+        }
+        if (find_endpoints(accessory, &endpoint_in, &endpoint_out) != 0) {
+            fprintf(stderr, "accessory bulk endpoints not found\n");
+            libusb_release_interface(usb_handle, 0);
+            libusb_close(usb_handle);
+            usb_handle = NULL;
+            libusb_unref_device(accessory);
+            usleep(500000);
+            continue;
+        }
+        libusb_unref_device(accessory);
+
+        if (existing_accessory && !bye_sent) {
+            bye_sent = 1;
+            send_bye_to_resync();
+        }
+
+        hello_length = 0;
+        printf("waiting for Android accessory client...\n");
         fflush(stdout);
-        libusb_control_transfer(usb_handle, 0x40, AOA_START, 0, 0, NULL, 0, 1000);
-        libusb_close(usb_handle);
-        usb_handle = NULL;
-        libusb_unref_device(device);
-
-        if (wait_for_accessory(&accessory) != 0) {
-            fprintf(stderr, "accessory did not enumerate\n");
-            libusb_exit(usb_ctx);
-            return 1;
+        unsigned char first[USB_BUFFER];
+        int first_length = 0;
+        while (!stopping && !paused && first_length <= 0) {
+            int rc_bulk = libusb_bulk_transfer(
+                usb_handle, endpoint_in, first, sizeof(first), &first_length, 1000
+            );
+            if (rc_bulk == LIBUSB_ERROR_TIMEOUT) continue;
+            if (rc_bulk != 0) {
+                fprintf(stderr, "accessory read failed: %d\n", rc_bulk);
+                first_length = 0;
+                break;
+            }
         }
-    } else {
-        printf("using existing accessory\n");
+        if (paused || stopping || first_length <= 0) {
+            libusb_release_interface(usb_handle, 0);
+            libusb_close(usb_handle);
+            usb_handle = NULL;
+            if (!paused && !stopping) usleep(200000);
+            continue;
+        }
+        memcpy(hello_data, first, (size_t)first_length);
+        hello_length = first_length;
+
+        tcp_fd = connect_tcp(port_number);
+        if (tcp_fd < 0) {
+            fprintf(stderr, "cannot connect helper on 127.0.0.1:%d\n", port_number);
+            libusb_release_interface(usb_handle, 0);
+            libusb_close(usb_handle);
+            usb_handle = NULL;
+            usleep(500000);
+            continue;
+        }
+        int one = 1;
+        setsockopt(tcp_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        if (write_all(tcp_fd, first, (size_t)first_length) != 0) {
+            close(tcp_fd);
+            tcp_fd = -1;
+            libusb_release_interface(usb_handle, 0);
+            libusb_close(usb_handle);
+            usb_handle = NULL;
+            usleep(500000);
+            continue;
+        }
+
+        printf("bridging accessory in=%02x out=%02x to tcp=%d\n", endpoint_in, endpoint_out, tcp_fd);
         fflush(stdout);
-    }
 
-    if (libusb_open(accessory, &usb_handle) != 0) {
-        fprintf(stderr, "cannot open accessory\n");
-        libusb_unref_device(accessory);
-        libusb_exit(usb_ctx);
-        return 1;
-    }
-    if (libusb_claim_interface(usb_handle, 0) != 0) {
-        fprintf(stderr, "cannot claim accessory interface\n");
-        libusb_close(usb_handle);
-        libusb_unref_device(accessory);
-        libusb_exit(usb_ctx);
-        return 1;
-    }
-    if (find_endpoints(accessory, &endpoint_in, &endpoint_out) != 0) {
-        fprintf(stderr, "accessory bulk endpoints not found\n");
-        libusb_release_interface(usb_handle, 0);
-        libusb_close(usb_handle);
-        libusb_unref_device(accessory);
-        libusb_exit(usb_ctx);
-        return 1;
-    }
-    libusb_unref_device(accessory);
+        pthread_t reader;
+        pthread_t writer;
+        pthread_create(&reader, NULL, usb_to_tcp, NULL);
+        pthread_create(&writer, NULL, tcp_to_usb, NULL);
+        pthread_join(reader, NULL);
+        pthread_join(writer, NULL);
 
-    if (existing_accessory) {
-        send_bye_to_resync();
-    }
-
-    printf("waiting for Android accessory client...\n");
-    fflush(stdout);
-    unsigned char first[USB_BUFFER];
-    int first_length = 0;
-    while (!stopping && first_length <= 0) {
-        int rc_bulk = libusb_bulk_transfer(
-            usb_handle, endpoint_in, first, sizeof(first), &first_length, 1000
-        );
-        if (rc_bulk == LIBUSB_ERROR_TIMEOUT) continue;
-        if (rc_bulk != 0) {
-            fprintf(stderr, "accessory read failed: %d\n", rc_bulk);
-            first_length = 0;
-            break;
+        if (tcp_fd >= 0) {
+            close(tcp_fd);
+            tcp_fd = -1;
         }
-    }
-    if (first_length <= 0) {
-        libusb_release_interface(usb_handle, 0);
-        libusb_close(usb_handle);
-        libusb_exit(usb_ctx);
-        return 1;
-    }
-    memcpy(hello_data, first, (size_t)first_length);
-    hello_length = first_length;
-
-    tcp_fd = connect_tcp(port);
-    if (tcp_fd < 0) {
-        fprintf(stderr, "cannot connect helper on 127.0.0.1:%d\n", port);
-        libusb_release_interface(usb_handle, 0);
-        libusb_close(usb_handle);
-        libusb_exit(usb_ctx);
-        return 1;
-    }
-    int one = 1;
-    setsockopt(tcp_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-    if (write_all(tcp_fd, first, (size_t)first_length) != 0) {
-        close(tcp_fd);
-        libusb_release_interface(usb_handle, 0);
-        libusb_close(usb_handle);
-        libusb_exit(usb_ctx);
-        return 1;
+        if (stopping && graceful_stop && usb_handle != NULL) {
+            int reset_rc = libusb_reset_device(usb_handle);
+            fprintf(stderr, "usb reset rc=%d\n", reset_rc);
+            fflush(stderr);
+        }
+        if (usb_handle != NULL) {
+            libusb_release_interface(usb_handle, 0);
+            libusb_close(usb_handle);
+            usb_handle = NULL;
+        }
+        if (!paused && !stopping) usleep(200000);
     }
 
-    printf("bridging accessory in=%02x out=%02x to tcp=%d\n", endpoint_in, endpoint_out, tcp_fd);
-    fflush(stdout);
-
-    pthread_t reader;
-    pthread_t writer;
-    pthread_create(&reader, NULL, usb_to_tcp, NULL);
-    pthread_create(&writer, NULL, tcp_to_usb, NULL);
-    pthread_join(reader, NULL);
-    pthread_join(writer, NULL);
-
-    close(tcp_fd);
-    tcp_fd = -1;
+    // 暂停期间被停止（SIGTERM/stop）也要把设备 reset 回普通 USB，
+    // 否则平板会一直停在配件模式。
     if (graceful_stop) {
-        /* Ask the phone to leave accessory mode; it re-enumerates as
-         * charging/MTP instead of staying in ACCESSORY until a cable replug. */
-        int reset_rc = libusb_reset_device(usb_handle);
-        fprintf(stderr, "usb reset rc=%d\n", reset_rc);
-        fflush(stderr);
+        libusb_device *acc = find_accessory_device();
+        if (acc != NULL) {
+            libusb_device_handle *handle = NULL;
+            if (libusb_open(acc, &handle) == 0) {
+                libusb_reset_device(handle);
+                libusb_close(handle);
+            }
+            libusb_unref_device(acc);
+        }
     }
-    libusb_release_interface(usb_handle, 0);
-    libusb_close(usb_handle);
-    usb_handle = NULL;
     libusb_exit(usb_ctx);
     return 0;
 }

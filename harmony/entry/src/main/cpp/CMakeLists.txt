@@ -10,7 +10,7 @@ endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
-add_library(mirage SHARED bridge.cpp video_decoder.cpp usb_transport.cpp)
+add_library(mirage SHARED bridge.cpp video_decoder.cpp usb_transport.cpp udp_receiver.cpp)
 
 target_link_libraries(mirage PUBLIC
     libace_napi.z.so
@@ -18,4 +18,5 @@ target_link_libraries(mirage PUBLIC
     libnative_window.so
     libnative_media_vdec.so
     libnative_media_codecbase.so
-    libnative_media_core.so)
+    libnative_media_core.so
+    libohcrypto.so)

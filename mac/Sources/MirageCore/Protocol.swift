@@ -22,6 +22,7 @@ public enum CtrlCode {
     public static let inputDisabled: UInt8 = 4
     public static let udpFailed: UInt8 = 5
     public static let udpReady: UInt8 = 6
+    public static let usbRequest: UInt8 = 7
 }
 
 public struct Frame: Equatable, Sendable {

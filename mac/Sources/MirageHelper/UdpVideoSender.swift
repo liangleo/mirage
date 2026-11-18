@@ -18,6 +18,7 @@ public final class UdpVideoSender: @unchecked Sendable {
     private let noncePrefix: Data
     private let sendHook: SendHook?
     private let queue = DispatchQueue(label: "app.mirage.udp.sender")
+    private var running = false
     private var fd: Int32 = -1
     private var source: DispatchSourceRead?
     private var peer: sockaddr_in?
@@ -60,6 +61,7 @@ public final class UdpVideoSender: @unchecked Sendable {
         }
 
         self.fd = fd
+        self.running = true
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         source.setEventHandler { [weak self] in
             self?.receiveLoop()
@@ -69,15 +71,44 @@ public final class UdpVideoSender: @unchecked Sendable {
     }
 
     public func stop() {
-        source?.cancel()
-        source = nil
-        if fd >= 0 {
-            close(fd)
-            fd = -1
+        running = false
+        queue.sync {
+            source?.cancel()
+            source = nil
+            if fd >= 0 {
+                close(fd)
+                fd = -1
+            }
+            cache.removeAll()
+            cacheOrder.removeAll()
+            retransmitted.removeAll()
         }
     }
 
     public func send(frame: EncodedFrame) {
+        // cache/nextSeq/peer 都在 sender 队列上访问：编码线程与收包线程共用
+        // 一份状态，之前直接在这里改 cache 会和 handleNack 撞字典直接崩溃。
+        if sendHook != nil {
+            // 测试注入的发送钩子不涉及 socket/收包线程，同步执行便于断言
+            sendOnQueue(frame)
+            return
+        }
+        queue.async { [weak self] in
+            self?.sendOnQueue(frame)
+        }
+    }
+
+    private var dropNotRunningLogged = false
+    private var dropNoPeerLogged = false
+
+    private func sendOnQueue(_ frame: EncodedFrame) {
+        guard running || sendHook != nil else {
+            if !dropNotRunningLogged {
+                dropNotRunningLogged = true
+                onLog?("udp drop: sender not running")
+            }
+            return
+        }
         let payload = frame.data
         guard !payload.isEmpty else { return }
         let fragCount = (payload.count + UdpVideoHeader.maxPayload - 1) / UdpVideoHeader.maxPayload
@@ -152,6 +183,10 @@ public final class UdpVideoSender: @unchecked Sendable {
         }
         guard let peer else {
             droppedFrames += 1
+            if !dropNoPeerLogged {
+                dropNoPeerLogged = true
+                onLog?("udp drop: peer unknown")
+            }
             return
         }
         var address = peer
@@ -184,8 +219,12 @@ public final class UdpVideoSender: @unchecked Sendable {
             guard let datagram = try? decodeUdpDatagram(data) else { continue }
 
             if datagram.header.isHello {
+                let knownPeer = peer != nil
                 peer = address
-                onLog?("udp peer ready")
+                if !knownPeer {
+                    let ip = String(cString: inet_ntoa(address.sin_addr))
+                    onLog?("udp peer ready from \(ip):\(UInt16(bigEndian: address.sin_port))")
+                }
                 onPeerReady?()
                 sendHelloAck()
             } else if datagram.header.isNack {

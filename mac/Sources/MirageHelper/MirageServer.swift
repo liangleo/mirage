@@ -33,6 +33,8 @@ public final class MirageServer: @unchecked Sendable {
     public var onKeyframeRequest: (() -> Void)?
     public var onLog: ((String) -> Void)?
     public var onHello: ((Hello) -> Void)?
+    public var onUsbRequest: (() -> Void)?
+    public var onSecureClientActive: ((Bool) -> Void)?
     public var onFeedback: ((Feedback) -> Void)?
     public var onInput: (@Sendable (InputEvent) -> Void)?
     public var inputAllowed: (@Sendable (Data) -> Bool)?
@@ -53,6 +55,7 @@ public final class MirageServer: @unchecked Sendable {
     private var keepalive: DispatchSourceTimer?
     private var udpSender: UdpVideoSender?
     private var udpPeerReady = false
+    private var udpClientReady = false
     private let wifiToggleLock = NSLock()
     private var lastFeedbackMicros: UInt64 = 0
     private var clientDeviceID: Data?
@@ -151,6 +154,10 @@ public final class MirageServer: @unchecked Sendable {
             guard let server = self else { return }
             server.queue.async {
                 server.udpPeerReady = true
+                server.onLog?("udp ready set")
+                // 静态画面时编码器可能长时间不出帧，UDP 会一直拿不到首帧；
+                // 这里主动要一个关键帧，让客户端尽快确认 UDP 通路。
+                server.onKeyframeRequest?()
             }
         }
         do {
@@ -246,15 +253,30 @@ public final class MirageServer: @unchecked Sendable {
         return listener
     }
 
+    private var broadcastDebugLogged = false
+    private var broadcastUdpLogged = false
+
     public func broadcast(_ encoded: EncodedFrame) {
         let frame = makeVideoFrame(encoded.header, annexB: encoded.data)
         queue.async { [weak self] in
             guard let self, let connection = self.connection else { return }
+            if !self.broadcastDebugLogged {
+                self.broadcastDebugLogged = true
+                self.onLog?("broadcast udpReady=\(self.udpPeerReady) sender=\(self.udpSender != nil)")
+            }
 
             if self.udpPeerReady, let udpSender = self.udpSender {
+                if !self.broadcastUdpLogged {
+                    self.broadcastUdpLogged = true
+                    self.onLog?("broadcast udp path")
+                }
                 self.session.noteOutbound(nowMicros: monotonicMicros())
                 udpSender.send(frame: encoded)
-                return
+                // 客户端还没确认收到 UDP 帧前，TCP 也继续发：静态画面时编码器
+                // 可能长时间不出帧，客户端等首帧期间不至于完全没数据。
+                if self.udpClientReady {
+                    return
+                }
             }
 
             let wasWaiting = self.sender.isWaitingForKeyframe
@@ -336,13 +358,23 @@ public final class MirageServer: @unchecked Sendable {
             switch state {
             case .ready:
                 self.onLog?("client connected")
+                if secure {
+                    self.onSecureClientActive?(true)
+                }
                 if let udpConfig = self.udpConfig {
                     self.send(encodeUdpConfig(udpConfig), on: newConnection)
                 }
                 self.receive(on: newConnection)
             case .failed, .cancelled:
                 self.onLog?("client disconnected")
+                if secure {
+                    self.onSecureClientActive?(false)
+                }
+                if self.udpPeerReady {
+                    self.onLog?("udp ready reset by new connection")
+                }
                 self.udpPeerReady = false
+                self.udpClientReady = false
                 self.onInput?(.releaseAll)
                 if self.connection === newConnection {
                     self.connection = nil
@@ -388,9 +420,14 @@ public final class MirageServer: @unchecked Sendable {
         if frame.type == MessageType.ctrl.rawValue, let code = frame.payload.first {
             if code == CtrlCode.udpFailed {
                 udpPeerReady = false
+                udpClientReady = false
                 onLog?("udp failed; falling back to TCP video")
             } else if code == CtrlCode.udpReady {
+                udpClientReady = true
                 onLog?("udp ready")
+            } else if code == CtrlCode.usbRequest {
+                onLog?("usb requested")
+                onUsbRequest?()
             }
         }
 

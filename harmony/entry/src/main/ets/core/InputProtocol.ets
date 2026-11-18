@@ -122,7 +122,10 @@ export enum CtrlCode {
   REQUEST_KEYFRAME = 1,
   RELEASE_ALL = 2,
   INPUT_ENABLED = 3,
-  INPUT_DISABLED = 4
+  INPUT_DISABLED = 4,
+  UDP_FAILED = 5,
+  UDP_READY = 6,
+  USB_REQUEST = 7
 }
 
 export class CtrlMessage {

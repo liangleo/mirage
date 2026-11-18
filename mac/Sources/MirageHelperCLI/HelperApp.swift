@@ -128,6 +128,21 @@ public final class HelperApp: @unchecked Sendable {
         server.onHello = { [weak self] hello in
             self?.handleAutoSize(hello)
         }
+        // A′：Wi-Fi/TLS 客户端在线期间让 AOA 桥保持暂停，避免它把设备切走并
+        // 抢走唯一客户端；AUTO 模式会显式发 USB_REQUEST 要求切换。
+        server.onSecureClientActive = { [weak self] active in
+            guard let self else { return }
+            if active {
+                self.cancelBridgeResume()
+                self.sendBridgeControl("pause")
+            } else {
+                self.scheduleBridgeResume()
+            }
+        }
+        server.onUsbRequest = { [weak self] in
+            self?.cancelBridgeResume()
+            self?.sendBridgeControl("resume")
+        }
         server.onLog = { message in
             print(message)
             fflush(stdout)
@@ -311,6 +326,47 @@ public final class HelperApp: @unchecked Sendable {
     private func requestKeyframe() {
         keyframes.request()
         capture?.requestFrame()
+    }
+
+    private var bridgeResumeTimer: DispatchSourceTimer?
+
+    /// 桥的命令通道：一行一条，pause/resume/stop。
+    private func sendBridgeControl(_ command: String) {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        var timeout = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(7780).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return }
+        let line = command + "\n"
+        _ = line.withCString { write(fd, $0, strlen($0)) }
+    }
+
+    private func cancelBridgeResume() {
+        bridgeResumeTimer?.cancel()
+        bridgeResumeTimer = nil
+    }
+
+    /// 没有客户端 30 秒后才恢复桥：Wi-Fi 已经连不上时插线也能自动走 USB。
+    private func scheduleBridgeResume() {
+        cancelBridgeResume()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 30)
+        timer.setEventHandler { [weak self] in
+            self?.bridgeResumeTimer = nil
+            self?.sendBridgeControl("resume")
+        }
+        timer.resume()
+        bridgeResumeTimer = timer
     }
 
     private func handleAutoSize(_ hello: Hello) {

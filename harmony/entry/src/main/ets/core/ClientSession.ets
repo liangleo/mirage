@@ -1,6 +1,7 @@
 import {
   decodePing,
   decodeSessionConfig,
+  decodeUdpConfig,
   decodeVideo,
   encodeFeedback,
   encodeHello,
@@ -10,8 +11,11 @@ import {
   Hello,
   MessageType,
   SessionConfig,
-  VideoFrame
+  UdpConfig,
+  VideoFrame,
+  VideoHeader
 } from './Protocol';
+import { UdpConfig as RxUdpConfig, UdpFrame, UdpReceiver, UdpReceiverListener } from './UdpReceiver';
 import {
   backoffMs,
   reduce,
@@ -72,6 +76,8 @@ export class ClientSession {
   private readonly hello: Hello;
   private readonly stats: Stats;
   private readonly listener: SessionListener;
+  private readonly udp: UdpReceiver | null;
+  private udpActive: boolean = false;
   private readonly model: SessionModel = new SessionModel();
   private readonly gate: InputGate = new InputGate();
 
@@ -93,12 +99,13 @@ export class ClientSession {
   private retryTimer: number = -1;
 
   constructor(choice: TransportChoice, factory: TransportFactory, hello: Hello, stats: Stats,
-    listener: SessionListener) {
+    listener: SessionListener, udp: UdpReceiver | null = null) {
     this.choice = choice;
     this.factory = factory;
     this.hello = hello;
     this.stats = stats;
     this.listener = listener;
+    this.udp = udp;
   }
 
   getStats(): Stats {
@@ -121,6 +128,7 @@ export class ClientSession {
   stop(): void {
     this.stopped = true;
     this.releaseAll();
+    this.stopUdp();
     this.clearTimers();
     this.dispatch(new SessionEvent(SessionEventKind.DISCONNECT), () => {
     });
@@ -149,6 +157,13 @@ export class ClientSession {
     this.hello.rotation = rotation;
     if (this.connected) {
       this.send(encodeHello(this.hello));
+    }
+  }
+
+  // AUTO 模式在 Wi-Fi 上串流时，请求 Mac 把设备切到 AOA，好让客户端切 USB
+  requestUsb(): void {
+    if (this.connected) {
+      this.send(encodeCtrl(CtrlCode.USB_REQUEST));
     }
   }
 
@@ -204,6 +219,66 @@ export class ClientSession {
       return;
     }
     this.send(encodeCtrl(CtrlCode.RELEASE_ALL));
+  }
+
+  private startUdp(payload: Uint8Array): void {
+    if (this.udp === null || this.choice.kind !== TransportKind.WIFI) {
+      return;
+    }
+    const host = this.choice.host;
+    if (host.startsWith('127.') || host === 'localhost' || host === '::1') {
+      return;
+    }
+    let parsed: UdpConfig;
+    try {
+      parsed = decodeUdpConfig(payload);
+    } catch (err) {
+      hilog.warn(0x0200, 'MirageSession', 'udp config ignored: %{public}s', (err as Error).message);
+      return;
+    }
+    if (!parsed.enabled) {
+      return;
+    }
+    const config = new RxUdpConfig();
+    config.host = host;
+    config.port = parsed.port;
+    config.key = parsed.key;
+    config.noncePrefix = parsed.noncePrefix;
+    const listener = new UdpReceiverListener();
+    listener.onReady = () => {
+      hilog.info(0x0200, 'MirageSession', 'udp peer answered');
+    };
+    listener.onFrame = (udpFrame: UdpFrame) => {
+      if (!this.udpActive) {
+        // 收到第一个完整 UDP 帧才停用 TCP：静态画面可能长时间没有帧
+        this.udpActive = true;
+        this.send(encodeCtrl(CtrlCode.UDP_READY));
+        hilog.info(0x0200, 'MirageSession', 'udp active');
+      }
+      this.stats.onVideo(udpFrame.bytes.length);
+      const header = new VideoHeader();
+      header.codec = 1;
+      header.flags = udpFrame.keyFrame ? 1 : 0;
+      header.frameId = udpFrame.frameId;
+      this.listener.onVideo(new VideoFrame(header, udpFrame.bytes));
+    };
+    listener.onFailed = (reason: string) => {
+      // 无论是否已经收到过 UDP 帧都通报失败：服务端可能已经进入 UDP 模式，
+      // 需要它尽快恢复 TCP 视频。
+      this.udpActive = false;
+      this.send(encodeCtrl(CtrlCode.UDP_FAILED));
+      hilog.warn(0x0200, 'MirageSession', 'udp failed, falling back to tcp: %{public}s', reason);
+    };
+    const started = this.udp.start(host, config, listener);
+    hilog.info(0x0200, 'MirageSession', 'udp start host=%{public}s port=%{public}d ok=%{public}s',
+      host, config.port, started ? 'true' : 'false');
+  }
+
+  private stopUdp(): void {
+    this.udpActive = false;
+    if (this.udp !== null) {
+      this.udp.stop();
+    }
   }
 
   private dispatch(event: SessionEvent, onOpen: () => void): void {
@@ -307,7 +382,12 @@ export class ClientSession {
       } catch (err) {
         hilog.warn(0x0200, 'MirageSession', 'ctrl decode failed: %{public}s', (err as Error).message);
       }
+    } else if (frame.type === MessageType.UDP_CONFIG) {
+      this.startUdp(frame.payload);
     } else if (frame.type === MessageType.VIDEO) {
+      if (this.udpActive) {
+        return;
+      }
       const video = decodeVideo(frame.payload);
       this.stats.onVideo(frame.payload.length);
       if (!Number.isNaN(this.clockOffsetMicros)) {
@@ -445,6 +525,7 @@ export class ClientSession {
   }
 
   private closeTransport(): void {
+    this.stopUdp();
     this.clearTimers();
     this.connected = false;
     this.gate.setConnected(false);

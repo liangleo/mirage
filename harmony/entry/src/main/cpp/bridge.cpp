@@ -1,6 +1,7 @@
 #include <napi/native_api.h>
 
 #include <atomic>
+#include <cstring>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -12,6 +13,7 @@
 
 #include "video_decoder.h"
 #include "usb_transport.h"
+#include "udp_receiver.h"
 
 namespace {
 
@@ -273,6 +275,156 @@ napi_value CloseDecoder(napi_env env, napi_callback_info) {
     return undefined;
 }
 
+std::mutex g_udpLock;
+std::shared_ptr<UdpReceiver> g_udp;
+napi_threadsafe_function g_udpTsfn = nullptr;
+
+struct UdpEventPayload {
+    std::string kind;
+    uint32_t frameId = 0;
+    bool key = false;
+    std::vector<uint8_t> data;
+    std::string reason;
+};
+
+void PostUdpEvent(UdpEventPayload payload) {
+    if (g_udpTsfn == nullptr) {
+        return;
+    }
+    auto *heap = new UdpEventPayload(std::move(payload));
+    if (napi_call_threadsafe_function(g_udpTsfn, heap, napi_tsfn_nonblocking) != napi_ok) {
+        delete heap;
+    }
+}
+
+void CallJsUdp(napi_env env, napi_value jsCallback, void *, void *raw) {
+    std::unique_ptr<UdpEventPayload> payload(static_cast<UdpEventPayload *>(raw));
+    if (env == nullptr || jsCallback == nullptr || payload == nullptr) {
+        return;
+    }
+    napi_value event;
+    napi_create_object(env, &event);
+    napi_value value;
+    napi_create_string_utf8(env, payload->kind.c_str(), NAPI_AUTO_LENGTH, &value);
+    napi_set_named_property(env, event, "kind", value);
+    if (payload->kind == "udpFrame") {
+        napi_create_uint32(env, payload->frameId, &value);
+        napi_set_named_property(env, event, "frameId", value);
+        napi_get_boolean(env, payload->key, &value);
+        napi_set_named_property(env, event, "key", value);
+        void *bytes = nullptr;
+        napi_value buffer;
+        napi_create_arraybuffer(env, payload->data.size(), &bytes, &buffer);
+        if (bytes != nullptr && !payload->data.empty()) {
+            std::memcpy(bytes, payload->data.data(), payload->data.size());
+        }
+        napi_set_named_property(env, event, "data", buffer);
+    } else if (!payload->reason.empty()) {
+        napi_create_string_utf8(env, payload->reason.c_str(), NAPI_AUTO_LENGTH, &value);
+        napi_set_named_property(env, event, "reason", value);
+    }
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    napi_call_function(env, undefined, jsCallback, 1, &event, nullptr);
+}
+
+napi_value OnUdpEvent(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    napi_valuetype type = napi_undefined;
+    if (argc < 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_function) {
+        napi_value undefined;
+        napi_get_undefined(env, &undefined);
+        return undefined;
+    }
+    napi_value name;
+    napi_create_string_utf8(env, "MirageUdpEvent", NAPI_AUTO_LENGTH, &name);
+    if (g_udpTsfn != nullptr) {
+        napi_release_threadsafe_function(g_udpTsfn, napi_tsfn_release);
+        g_udpTsfn = nullptr;
+    }
+    napi_create_threadsafe_function(env, argv[0], nullptr, name, 0, 1, nullptr, nullptr, nullptr,
+        CallJsUdp, &g_udpTsfn);
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    return undefined;
+}
+
+napi_value StartUdp(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4] = {nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    if (argc < 4) {
+        return undefined;
+    }
+    char host[64] = {0};
+    size_t hostLen = 0;
+    int32_t port = 0;
+    if (napi_get_value_string_utf8(env, argv[0], host, sizeof(host), &hostLen) != napi_ok ||
+        napi_get_value_int32(env, argv[1], &port) != napi_ok) {
+        return undefined;
+    }
+    void *keyData = nullptr;
+    size_t keyLen = 0;
+    void *nonceData = nullptr;
+    size_t nonceLen = 0;
+    if (!GetBytes(env, argv[2], &keyData, &keyLen) || !GetBytes(env, argv[3], &nonceData, &nonceLen)) {
+        return undefined;
+    }
+    std::vector<uint8_t> key(static_cast<uint8_t *>(keyData), static_cast<uint8_t *>(keyData) + keyLen);
+    std::vector<uint8_t> nonce(static_cast<uint8_t *>(nonceData),
+                               static_cast<uint8_t *>(nonceData) + nonceLen);
+
+    auto receiver = std::make_shared<UdpReceiver>();
+    const bool ok = receiver->Start(host, static_cast<uint16_t>(port), key, nonce,
+        [](UdpReceiver::Frame &&frame) {
+            UdpEventPayload payload;
+            payload.kind = "udpFrame";
+            payload.frameId = frame.frameId;
+            payload.key = frame.keyFrame;
+            payload.data = std::move(frame.data);
+            PostUdpEvent(std::move(payload));
+        },
+        [](const std::string &kind, const std::string &reason) {
+            UdpEventPayload payload;
+            payload.kind = kind;
+            payload.reason = reason;
+            PostUdpEvent(std::move(payload));
+        });
+    if (ok) {
+        std::shared_ptr<UdpReceiver> previous;
+        {
+            std::lock_guard<std::mutex> guard(g_udpLock);
+            previous = std::move(g_udp);
+            g_udp = receiver;
+        }
+        if (previous != nullptr) {
+            previous->Stop();
+        }
+    }
+    napi_value result;
+    napi_get_boolean(env, ok, &result);
+    return result;
+}
+
+napi_value StopUdp(napi_env env, napi_callback_info) {
+    std::shared_ptr<UdpReceiver> receiver;
+    {
+        std::lock_guard<std::mutex> guard(g_udpLock);
+        receiver = std::move(g_udp);
+        g_udp = nullptr;
+    }
+    if (receiver != nullptr) {
+        receiver->Stop();
+    }
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    return undefined;
+}
+
 napi_value Init(napi_env env, napi_value exports) {
     g_env = env;
     napi_property_descriptor desc[] = {
@@ -280,6 +432,9 @@ napi_value Init(napi_env env, napi_value exports) {
         {"submitVideo", nullptr, SubmitVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"closeDecoder", nullptr, CloseDecoder, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"onEvent", nullptr, OnEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"onUdpEvent", nullptr, OnUdpEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startUdp", nullptr, StartUdp, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopUdp", nullptr, StopUdp, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startUsb", nullptr, StartUsb, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopUsb", nullptr, StopUsb, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"usbWrite", nullptr, UsbWrite, nullptr, nullptr, nullptr, napi_default, nullptr},

@@ -1,10 +1,10 @@
 # Mirage 鸿蒙原生客户端设计
 
-版本：v1.3（2026-11-18，H5：旋转自动恢复、开源收尾；H2 UDP 仍待实现）
+版本：v1.4（2026-11-18，H2：UDP 视频落地；H5 收尾）
 上位设计：[Mirage 设计文档](2026-11-13-mirage-design.md)（协议、Mac 端、验收标准以该文档为准，本文只写客户端差异）
 输入协议：[M5 输入回传设计](2026-11-14-mirage-input-design.md)
 
-**实现状态**：H1（Wi-Fi TCP/TLS 出画面）、H3（输入与控制工具条）、H4（USB AOA + AUTO 降级）已落地；FEEDBACK（10Hz 接收状态上报）已实现并驱动 Mac 端自适应码率；H2 的 UDP 视频仍未实现——客户端解析到 `UDP_CONFIG` 后忽略，Mac 端在收不到 UDP 握手前继续走 TCP。另有平台经验固化：TLS 固定 1.2、AUTO 插线自动回切 USB、Mac 服务开启即同时提供 USB + Wi-Fi（运行中经回环控制通道启停，不重启捕获）；旋转经 `window.on('windowSizeChange')` 检测并自动恢复。H5 已收尾：README/LICENSE/图标脚本/探针清理，正文已按实到代码修订。
+**实现状态**：H1（Wi-Fi TCP/TLS 出画面）、H3（输入与控制工具条）、H4（USB AOA + AUTO 降级）已落地；FEEDBACK（10Hz 接收状态上报）已实现并驱动 Mac 端自适应码率；H2 的 UDP 视频已实现：native 收包 + AES-GCM 解密 + 分片重组 + NACK，首个完整帧后切 UDP、弱网回退 TCP。另有平台经验固化：TLS 固定 1.2、AUTO 插线自动回切 USB、Mac 服务开启即同时提供 USB + Wi-Fi（运行中经回环控制通道启停，不重启捕获）；旋转经 `window.on('windowSizeChange')` 检测并自动恢复。H5 已收尾：README/LICENSE/图标脚本/探针清理，正文已按实到代码修订。
 
 ---
 
@@ -80,12 +80,14 @@ entry/src/main/ets/
 │   └── StatsOverlay.ets
 ├── core/
 │   ├── ClientSession.ets                # 显式状态机运行时（§5）
+│   ├── UdpReceiver.ets                  # UDP 接收抽象（帧/就绪/失败）
 │   ├── SessionMachine.ets               # 纯 reducer：状态与事件
 │   ├── Runtime.ets                      # 跨页共享的单会话引用
 │   ├── Protocol.ets                     # 帧、FrameDecoder、HELLO、SESSION_CONFIG、VIDEO、PING
 │   ├── InputProtocol.ets / InputGate.ets # INPUT/KEY/TEXT/SCROLL 编码、服务端门控
 │   └── Stats.ets
 ├── transport/
+│   ├── NativeUdpReceiver.ets            # libmirage.startUdp/onUdpEvent 封装
 │   ├── Transport.ets                    # 接口：open/read/write/close
 │   ├── TcpTransport.ets
 │   ├── TlsTransport.ets                 # 指纹校验
@@ -103,6 +105,7 @@ entry/src/main/ets/
 └── settings/SettingsStore.ets           # preferences：host/port/fingerprint/device_id/transportMode
 
 entry/src/main/cpp/
+├── udp_receiver.cpp/.h                  # UDP 收包/解密/重组/NACK
 ├── video_decoder.cpp/.h                 # AVCodec surface 模式解码器（含 buffer 回退）
 ├── usb_transport.cpp/.h                 # fd 读取线程 + threadsafe 回调 + O_NONBLOCK 写
 └── bridge.cpp                           # 导出：startUsb/stopUsb/usbWrite/openDecoder/submitVideo/...
@@ -257,10 +260,21 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 - 指纹来源：扫码 / 粘贴配对链接 / mDNS TXT 中与已存指纹一致时自动连接。
 - `TCP_NODELAY`：鸿蒙 TCP socket 通过 `setExtraOptions({ tcpNoDelay: true })` 开启，等价 Android。
 
-### 7.4 UDP（未实现，H2 待立计划）
+### 7.4 UDP（已实现）
 
-- 客户端目前解析到 `UDP_CONFIG` 后直接忽略；Mac 端在收到 UDP 握手前继续发 TCP 视频，Wi-Fi 出画面不受影响。
-- H2 若启动，按原设计：收到 `UDP_CONFIG` 后把 `host/port/key/noncePrefix` 交给 native，POSIX UDP socket + AES-256-GCM 解密 + 重组 + NACK 全部在 native（ArkTS 单次 AES-GCM 往返 0.81ms，25Mbps 档约 2600 包/秒，放在 JS 会吃掉约一个核），就绪后发 `UDP_READY` 并忽略 TCP 视频。
+- `UDP_CONFIG`（type 12）到达后，客户端把 host/port/key/noncePrefix 交给 native（`udp_receiver.cpp`）；
+  仅 Wi-Fi 且非回环地址时启用。
+- 线格式与 Mac 端一致：16B 大端头（seq/frameID/fragIndex/fragCount/flags/payloadLength）+ AES-256-GCM 密文与 tag；
+  AAD 为 16B 头，nonce = noncePrefix(4) + seq(u64 BE)；分片 ≤1200B。
+- 握手：native 每 500ms 发一次 HELLO（无载荷），**收到第一个完整视频帧前一直重发**（TLS 重连会复位服务端的 udpPeerReady）；
+  服务端收到 HELLO 置 peer ready 并回 ACK，同时主动请求关键帧，避免静态画面长时间无帧。
+- 切换：客户端**收到首个完整 UDP 帧后才发 `CTRL UDP_READY` 并停止使用 TCP 视频**；在此之前服务端同时发 TCP 与 UDP，
+  静态画面不会因“无首帧”误判失败。
+- 重组与重传：按 frameID 分片重组，缺片在 EOF 或更新帧到达 6ms 后发 NACK（bitmap，最多 2 轮）；
+  服务端缓存最近 3 帧用于重传。`lastDelivered` 之前的迟到帧直接丢弃。
+- 回退：HELLO 后 30s 仍无视频帧，或已出帧后 10s 无数据报 → native 报 `udpFailed`，客户端发 `CTRL UDP_FAILED`，
+  服务端恢复 TCP 视频。
+- 统计：UDP 帧没有采集时间戳，`e2e`/`p95` 显示 `--`；fps、码率、解码耗时、RTT 正常。
 
 ### 7.5 Mac 端服务模型（本轮落地）
 
@@ -271,6 +285,10 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 - 服务停止后再开启必须恢复 USB：菜单记录刚被终止的 helper PID，`start()` 会先等端口释放再拉起新 helper，不再把正在退出的旧进程当成「已有 helper」接管；接管已有/外部 helper 时同样会启动 AOA 桥（服务 = 双通道）。
 - macOS 菜单栏「停止共享」会停掉 `SCStream`：helper 通过 `SCStreamDelegate.didStopWithError` 感知后自行退出，菜单显示「已停止」，同时停掉 AOA 桥（避免桥对着已死 helper 无限重连）。
 - 安全边界：控制端口只绑定回环；Wi-Fi 仍强制 TLS + 指纹固定，明文端口只绑定回环。
+- **AOA 桥按需切换（A′）**：桥监听回环控制口 7780（`pause`/`resume`/`stop`）。helper 在 TLS 客户端接入时发 `pause`
+  （桥断开配件、不再 AOA_START），显式 Wi-Fi 会话因此不会被抢；客户端在 AUTO 模式且走 Wi-Fi 时每 3 秒发
+  `CTRL USB_REQUEST(7)`，helper 收到即 `resume`，桥切 AOA，客户端轮询到配件后改连 USB。无客户端 30 秒后自动 `resume`，
+  保证“Wi-Fi 不通 + 插线”也能落到 USB。
 
 ## 8. 解码与渲染
 
@@ -322,7 +340,7 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 | 阶段 | 内容 | 退出标准 | 状态（2026-11-17） |
 |---|---|---|---|
 | H1 | 工程骨架、Protocol/Stats、TCP + TLS（含指纹校验）、mDNS、粘贴配对、AVCodec surface 解码上屏、断线重连、设置持久化 | Wi-Fi 连上 Mac 出画面，60fps，统计可见 | 完成（模拟器 + 真实 Helper 验收） |
-| H2 | UDP（native 收包 + NDK AES-GCM + 重组/NACK）+ FEEDBACK | 弱网下自动回退、断电重连、连续 30min 不断流 | FEEDBACK 完成；UDP 未实现 |
+| H2 | UDP（native 收包 + NDK AES-GCM + 重组/NACK）+ FEEDBACK | 弱网下自动回退、断电重连、连续 30min 不断流 | UDP 已实现并真机验证（动态画面 47–53fps、decode≈25–31ms、60s soak 无崩溃）；弱网丢包注入与 30min 长测待补 |
 | H3 | 输入：触控/手势/键盘/笔 + 服务端门控 + 控制抽屉 | 与 Android 端行为逐项对照通过 | 完成 |
 | H4 | USB AOA 传输接入（native fd + ArkTS 拆帧）+ AUTO 降级 + 热插拔恢复 | 本机 USB 路径 ≤50ms p95，拔插可恢复 | 完成：USB 授权/拒绝/拔插恢复/AUTO 优先/断开停轮询均真机通过；USB p95 20–30ms 常态（偶发关键帧尖峰）。AUTO 支持插线自动回切 USB |
 | H5 | 旋转重配置、开源发布：README、LICENSE、仓库清理、Release 构建说明 | 全新机器按 README 能构建并连上 | 完成：旋转经 windowSizeChange 检测并自动恢复（真机验收）；README/LICENSE/图标脚本/探针清理完成 |
@@ -338,6 +356,8 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 5. **系统杀后台/息屏**：v1 只承诺前台亮屏 + 常亮，不做后台保活；README 写明，避免用户预期落空。
 6. **mDNS 权限与组播**：鸿蒙可能限制组播；手动地址与二维码是主路径。
 7. **入口 UI 差异**：扫码依赖系统扫码 UI（`@kit.ScanKit`），不需要 App 声明相机权限；无法调起时保留粘贴配对链接。
+8. **auto-size 的 execv 重启**：HELLO 触发重新 execv 后，旧虚拟屏释放与新屏创建之间存在窗口，偶发
+   `SCStreamErrorDomain -3815（找不到显示器）` 导致 helper 退出；表现为客户端等待重连。当前靠菜单重新开服务恢复，后续应在捕获启动处加重试。
 
 ## 15. 留给实现者的决定
 
@@ -355,7 +375,7 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 |---|---|---|---|
 | 1 | `OH_VideoDecoder_SetSurface` 在本机实际渲染成功 | H1 首帧上屏 | 已验证（H1 验收） |
 | 2 | `getRemoteCertificate()` 返回 DER 且指纹与 Mac 端一致 | H1 打印 SHA-256 与 QR 指纹对照 | 已验证（H1 验收） |
-| 3 | native UDP 收包 + NDK AES-GCM 能否跟上 25Mbps（≈2600 包/秒） | H2 满速实测丢包率与 CPU 占用 | 未开始（H2） |
+| 3 | native UDP 收包 + NDK AES-GCM 能否跟上 25Mbps（≈2600 包/秒） | H2 满速实测丢包率与 CPU 占用 | 已验证：真机约 3000 数据报/秒、解密失败 0；动态画面 47–53fps |
 | 4 | 隐藏 TextInput 的软键盘文本差量行为 | H3 中文输入、退格、回车 | 已实现（H3） |
 | 5 | 扫码能否在 WEB-W00 + 自动签名下直接调起（是否依赖 AGC 配置） | 真机点击扫码 | 已验证：`@kit.ScanKit` 系统扫码 UI 可直接调起，不依赖 AGC，App 无需 CAMERA |
 | 6 | 旋转时画面恢复的交互 | 前后旋转各 3 次 | 已验证（2026-11-18）：windowSizeChange → 重发 HELLO → 服务端重建虚拟屏 → 自动重连并按新尺寸重建解码器 |

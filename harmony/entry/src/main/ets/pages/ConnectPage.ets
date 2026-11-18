@@ -13,6 +13,7 @@ import { decideDiscovery, DiscoveredMac, MdnsDiscovery } from '../net/MdnsDiscov
 import { PairingPayload, parsePairingUrl } from '../net/Pairing';
 import { PreferencesKeyValueStore, Settings, SettingsStore, TransportMode } from '../settings/SettingsStore';
 import { TcpTransport } from '../transport/TcpTransport';
+import { NativeUdpReceiver } from '../transport/NativeUdpReceiver';
 import { TlsTransport } from '../transport/TlsTransport';
 import { Transport } from '../transport/Transport';
 import { selectTransport, TransportChoice, TransportKind } from '../transport/TransportSelector';
@@ -339,6 +340,11 @@ struct ConnectPage {
       if (this.mode !== TransportMode.AUTO || this.busy) {
         return;
       }
+      const session = Runtime.session;
+      if (session !== null && this.lastKind !== null && this.lastKind !== TransportKind.USB) {
+        // Mac 侧桥在 Wi-Fi 客户端在线时不会主动 AOA，这里显式请求切换
+        session.requestUsb();
+      }
       if (!hasUsbAccessory(new SystemUsbPort())) {
         this.usbSwitchFailures = 0;
         return;
@@ -563,7 +569,7 @@ struct ConnectPage {
       },
       (enabled: boolean, reason: string) => {
         Runtime.onInputGate(enabled, reason);
-      }));
+      }), new NativeUdpReceiver());
     Runtime.session = session;
 
     const store = this.store;

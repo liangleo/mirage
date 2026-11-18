@@ -1,16 +1,6 @@
+import { CtrlCode } from '../../../main/ets/core/InputProtocol';
 import { describe, it, expect } from '@ohos/hypium';
-import {
-  FrameDecoder,
-  MessageType,
-  Hello,
-  encodeHello,
-  encodeFeedback,
-  encodePing,
-  decodePing,
-  decodeSessionConfig,
-  decodeVideo,
-  encodeFrame
-} from '../../../main/ets/core/Protocol';
+import { FrameDecoder, MessageType, Hello, encodeHello, encodeFeedback, encodePing, decodePing, decodeSessionConfig, decodeVideo, encodeFrame, decodeUdpConfig } from '../../../main/ets/core/Protocol';
 
 const VECTOR_HELLO =
   '0000002701010001000102030405060708090a0b0c0d0e0f0a00064000f000f03c010000064d6972616765';
@@ -218,6 +208,60 @@ export default function protocolTest() {
       decoder.append(full.slice(4));
       expect(decodePing(decoder.next()!.payload)).assertEqual(42);
       expect(decoder.skippedBytes).assertEqual(0);
+    });
+  });
+
+  describe('udp config', () => {
+    it('decodes an enabled AES-GCM config', 0, () => {
+      const payload = new Uint8Array(40);
+      const view = new DataView(payload.buffer);
+      view.setUint16(0, 7778);
+      payload[2] = 1; // AES-256-GCM
+      for (let i = 0; i < 32; i++) {
+        payload[3 + i] = i;
+      }
+      payload[35] = 0xaa;
+      payload[36] = 0xbb;
+      payload[37] = 0xcc;
+      payload[38] = 0xdd;
+      payload[39] = 1; // enabled
+      const config = decodeUdpConfig(payload);
+      expect(config.port).assertEqual(7778);
+      expect(config.key.length).assertEqual(32);
+      expect(config.key[0]).assertEqual(0);
+      expect(config.key[31]).assertEqual(31);
+      expect(config.noncePrefix.length).assertEqual(4);
+      expect(config.noncePrefix[3]).assertEqual(0xdd);
+      expect(config.enabled).assertTrue();
+    });
+
+    it('rejects a short payload', 0, () => {
+      let threw = false;
+      try {
+        decodeUdpConfig(new Uint8Array(39));
+      } catch (err) {
+        threw = true;
+      }
+      expect(threw).assertTrue();
+    });
+
+    it('rejects unsupported ciphers', 0, () => {
+      const payload = new Uint8Array(40);
+      const view = new DataView(payload.buffer);
+      view.setUint16(0, 7778);
+      payload[2] = 2; // ChaCha20-Poly1305, not implemented
+      let threw = false;
+      try {
+        decodeUdpConfig(payload);
+      } catch (err) {
+        threw = true;
+      }
+      expect(threw).assertTrue();
+    });
+
+    it('exposes the udp control codes', 0, () => {
+      expect(CtrlCode.UDP_FAILED).assertEqual(5);
+      expect(CtrlCode.UDP_READY).assertEqual(6);
     });
   });
 }

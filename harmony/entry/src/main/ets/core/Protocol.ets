@@ -184,6 +184,30 @@ export class SessionConfig {
   inputCaps: number = 0;
 }
 
+export class UdpConfig {
+  port: number = 0;
+  key: Uint8Array = new Uint8Array(0);
+  noncePrefix: Uint8Array = new Uint8Array(0);
+  enabled: boolean = false;
+}
+
+// UDP_CONFIG payload: port u16 | cipher u8 | key 32 | noncePrefix 4 | flags u8
+export function decodeUdpConfig(payload: Uint8Array): UdpConfig {
+  if (payload.length < 40) {
+    throw new ProtocolException('udp config too short');
+  }
+  if (payload[2] !== 1) {
+    throw new ProtocolException('unsupported udp cipher');
+  }
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.length);
+  const config = new UdpConfig();
+  config.port = view.getUint16(0);
+  config.key = payload.slice(3, 35);
+  config.noncePrefix = payload.slice(35, 39);
+  config.enabled = (payload[39] & 1) !== 0;
+  return config;
+}
+
 export class VideoHeader {
   codec: number = 0;
   flags: number = 0;
