@@ -38,6 +38,10 @@ export class NativeUdpReceiver implements UdpReceiver {
       listener.onFailed(event.reason !== undefined ? event.reason : 'udp failed');
       return;
     }
+    if (event.kind === 'udpKeyframe') {
+      listener.onKeyframeNeeded();
+      return;
+    }
     if (event.kind === 'udpFrame' && event.data !== undefined) {
       listener.onFrame(new UdpFrame(event.frameId !== undefined ? event.frameId : 0,
         event.key === true, new Uint8Array(event.data)));

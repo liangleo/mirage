@@ -56,6 +56,7 @@ public final class MirageServer: @unchecked Sendable {
     private var udpSender: UdpVideoSender?
     private var udpPeerReady = false
     private var udpClientReady = false
+    private var lastRetransmitKeyframeMicros: UInt64 = 0
     private let wifiToggleLock = NSLock()
     private var lastFeedbackMicros: UInt64 = 0
     private var clientDeviceID: Data?
@@ -150,6 +151,18 @@ public final class MirageServer: @unchecked Sendable {
         )
         let sender = UdpVideoSender(port: tlsPort, key: key, noncePrefix: noncePrefix)
         sender.onLog = onLog
+        sender.onRetransmitBurst = { [weak self] in
+            guard let server = self else { return }
+            server.queue.async {
+                let now = monotonicMicros()
+                // 最多每 500ms 要一次，避免重传风暴里连续重建 IDR
+                if now - server.lastRetransmitKeyframeMicros < 500_000 {
+                    return
+                }
+                server.lastRetransmitKeyframeMicros = now
+                server.onKeyframeRequest?()
+            }
+        }
         sender.onPeerReady = { [weak self] in
             guard let server = self else { return }
             server.queue.async {

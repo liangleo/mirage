@@ -262,6 +262,9 @@ export class ClientSession {
       header.frameId = udpFrame.frameId;
       this.listener.onVideo(new VideoFrame(header, udpFrame.bytes));
     };
+    listener.onKeyframeNeeded = () => {
+      this.requestKeyframe();
+    };
     listener.onFailed = (reason: string) => {
       // 无论是否已经收到过 UDP 帧都通报失败：服务端可能已经进入 UDP 模式，
       // 需要它尽快恢复 TCP 视频。

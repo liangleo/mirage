@@ -79,6 +79,7 @@ private:
     bool connected_ = false;
     bool sawVideo_ = false;
     bool loggedFirstPacket_ = false;
+    bool needKeyframe_ = false;
     uint32_t nextSeq_ = 1;
     int helloTries_ = 0;
     int64_t lastHelloMs_ = 0;

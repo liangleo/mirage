@@ -145,3 +145,13 @@ E2E（模拟器原生 2880×1920，视频铺满时）：
 ```
 
 注意：`display.on('change')` 在本机不回调，旋转检测走 `window.on('windowSizeChange')`。
+
+## UDP 丢包注入（弱网 NACK）
+
+```bash
+MIRAGE_UDP_LOSS=0.03 /Applications/Mirage.app/Contents/MacOS/mirage-helper --mode extend \
+  --port 7777 --fps 60 --control-port 7779 --width 1440 --height 960 --position right
+```
+
+预期：客户端 `MirageUdp: ... nacks=数十/2s`、`frames` 持续增长、画面可解码（丢包越重花屏越多，
+服务端会按重传频率主动补关键帧）；`decryptFail` 应保持 0。不设环境变量时行为与正式服务一致。

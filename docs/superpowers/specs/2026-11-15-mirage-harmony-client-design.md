@@ -266,12 +266,16 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
   仅 Wi-Fi 且非回环地址时启用。
 - 线格式与 Mac 端一致：16B 大端头（seq/frameID/fragIndex/fragCount/flags/payloadLength）+ AES-256-GCM 密文与 tag；
   AAD 为 16B 头，nonce = noncePrefix(4) + seq(u64 BE)；分片 ≤1200B。
+- native 侧 UDP socket 为非阻塞、每次读事件最多排空 64 个数据报：阻塞读会长期占住
+  sender 串行队列，导致排队中的视频发送永远执行不到（只有 HELLO ACK 能发出去）。
 - 握手：native 每 500ms 发一次 HELLO（无载荷），**收到第一个完整视频帧前一直重发**（TLS 重连会复位服务端的 udpPeerReady）；
   服务端收到 HELLO 置 peer ready 并回 ACK，同时主动请求关键帧，避免静态画面长时间无帧。
 - 切换：客户端**收到首个完整 UDP 帧后才发 `CTRL UDP_READY` 并停止使用 TCP 视频**；在此之前服务端同时发 TCP 与 UDP，
   静态画面不会因“无首帧”误判失败。
-- 重组与重传：按 frameID 分片重组，缺片在 EOF 或更新帧到达 6ms 后发 NACK（bitmap，最多 2 轮）；
-  服务端缓存最近 3 帧用于重传。`lastDelivered` 之前的迟到帧直接丢弃。
+- 重组与重传：按 frameID 分片重组，缺片在 EOF 或更新帧到达 6ms 后发 NACK（bitmap，最多 3 轮）；
+  服务端缓存最近 8 帧用于重传。交付**严格按 frameID 顺序**：头部帧缺片时等待补齐，
+  超过 200ms 仍缺片则丢弃该帧并请求新的关键帧（否则后续 P 帧先播放，解码器永远等不到 IDR）。
+  服务端重传计数每累计 40 次也会主动请求关键帧（≤1 次/500ms），缩短花屏时间。
 - 回退：HELLO 后 30s 仍无视频帧，或已出帧后 10s 无数据报 → native 报 `udpFailed`，客户端发 `CTRL UDP_FAILED`，
   服务端恢复 TCP 视频。
 - 统计：UDP 帧没有采集时间戳，`e2e`/`p95` 显示 `--`；fps、码率、解码耗时、RTT 正常。

@@ -7,6 +7,8 @@ public final class UdpVideoSender: @unchecked Sendable {
 
     public var onPeerReady: (() -> Void)?
     public var onLog: ((String) -> Void)?
+    /// 重传频繁说明链路在丢包：让上层请求关键帧，缩短花屏时间。
+    public var onRetransmitBurst: (() -> Void)?
 
     public private(set) var sentDatagrams = 0
     public private(set) var retransmits = 0
@@ -60,6 +62,10 @@ public final class UdpVideoSender: @unchecked Sendable {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
 
+        // 非阻塞：receiveLoop 在同一个串行队列上排空，如果 fd 阻塞在这里，
+        // 排队等待的 sendOnQueue 永远拿不到队列（表现为只有 HELLO ACK 能发出去）。
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
         self.fd = fd
         self.running = true
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
@@ -98,6 +104,12 @@ public final class UdpVideoSender: @unchecked Sendable {
         }
     }
 
+    // 仅调试：MIRAGE_UDP_LOSS=0.03 时按概率丢包，用来验证客户端 NACK 重传。
+    private let simulatedLoss: Double = {
+        guard let raw = ProcessInfo.processInfo.environment["MIRAGE_UDP_LOSS"],
+              let value = Double(raw) else { return 0 }
+        return min(max(value, 0), 1)
+    }()
     private var dropNotRunningLogged = false
     private var dropNoPeerLogged = false
 
@@ -147,7 +159,7 @@ public final class UdpVideoSender: @unchecked Sendable {
 
         cache[frame.header.frameID] = datagrams
         cacheOrder.append(frame.header.frameID)
-        while cacheOrder.count > 3 {
+        while cacheOrder.count > 8 {
             cache.removeValue(forKey: cacheOrder.removeFirst())
         }
         for datagram in datagrams {
@@ -170,12 +182,18 @@ public final class UdpVideoSender: @unchecked Sendable {
                 guard !retransmitted.contains(key) else { continue }
                 retransmitted.insert(key)
                 retransmits += 1
+                if retransmits % 40 == 0 {
+                    onRetransmitBurst?()
+                }
                 emit(fragments[fragIndex])
             }
         }
     }
 
     private func emit(_ datagram: Data) {
+        if simulatedLoss > 0, Double.random(in: 0..<1) < simulatedLoss {
+            return
+        }
         if let sendHook {
             sendHook(datagram)
             sentDatagrams += 1
@@ -204,7 +222,7 @@ public final class UdpVideoSender: @unchecked Sendable {
 
     private func receiveLoop() {
         var buffer = [UInt8](repeating: 0, count: 2048)
-        while true {
+        for _ in 0..<64 {
             var address = sockaddr_in()
             var length = socklen_t(MemoryLayout<sockaddr_in>.size)
             let count = buffer.withUnsafeMutableBytes { raw in
@@ -214,7 +232,7 @@ public final class UdpVideoSender: @unchecked Sendable {
                     }
                 }
             }
-            guard count > 0 else { return }
+            guard count > 0 else { return }  // EAGAIN：本轮排空，交回队列
             let data = Data(buffer[0..<count])
             guard let datagram = try? decodeUdpDatagram(data) else { continue }
 

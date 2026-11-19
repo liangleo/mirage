@@ -310,23 +310,33 @@ void UdpReceiver::HandleDatagram(const uint8_t *data, size_t length) {
 
 void UdpReceiver::DeliverReadyFrames() {
     while (true) {
-        uint32_t bestId = 0;
+        // 严格按 frameID 顺序交付：跳过缺片的旧帧会让解码器永远拿不到 IDR。
+        uint32_t smallest = 0;
         bool found = false;
-        for (auto &entry : pending_) {
+        for (const auto &entry : pending_) {
             if (entry.first <= lastDelivered_) {
                 continue;
             }
-            if (entry.second.received == entry.second.fragCount) {
-                if (!found || entry.first < bestId) {
-                    bestId = entry.first;
-                    found = true;
-                }
+            if (!found || entry.first < smallest) {
+                smallest = entry.first;
+                found = true;
             }
         }
         if (!found) {
             break;
         }
-        PendingFrame &pending = pending_[bestId];
+        PendingFrame &pending = pending_[smallest];
+        if (pending.received < pending.fragCount) {
+            // 还在等 NACK 补齐；超过 200ms 仍缺片就放弃这帧并请求新的关键帧。
+            if (NowMs() - pending.firstSeenMs < 200) {
+                break;
+            }
+            lastDelivered_ = smallest;
+            pending_.erase(smallest);
+            needKeyframe_ = true;
+            continue;
+        }
+        uint32_t bestId = smallest;
         Frame frame;
         frame.frameId = bestId;
         frame.keyFrame = pending.keyFrame;
@@ -420,6 +430,10 @@ void UdpReceiver::Loop() {
         }
         TickPending(NowMs());
         DeliverReadyFrames();
+        if (needKeyframe_) {
+            needKeyframe_ = false;
+            onEvent_("udpKeyframe", "");
+        }
         if (now - lastStatsMs_ >= 2000) {
             lastStatsMs_ = now;
             OH_LOG_Print(LOG_APP, LOG_INFO, 0x0200, "MirageUdp",

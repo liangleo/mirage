@@ -20,6 +20,8 @@ export class UdpReceiverListener {
   };
   onFailed: (reason: string) => void = (reason: string) => {
   };
+  onKeyframeNeeded: () => void = () => {
+  };
 }
 
 export class UdpConfig {
