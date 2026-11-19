@@ -4,6 +4,7 @@ import {
   decodeUdpConfig,
   decodeVideo,
   encodeFeedback,
+  frameE2eMs,
   encodeHello,
   encodePing,
   Frame,
@@ -260,6 +261,12 @@ export class ClientSession {
       header.codec = 1;
       header.flags = udpFrame.keyFrame ? 1 : 0;
       header.frameId = udpFrame.frameId;
+      header.captureTsMicros = udpFrame.captureTsMicros;
+      const e2e = frameE2eMs(Date.now() * 1000, this.clockOffsetMicros,
+        udpFrame.captureTsMicros, MAX_E2E_MS);
+      if (e2e >= 0) {
+        this.stats.setE2eMs(e2e);
+      }
       this.listener.onVideo(new VideoFrame(header, udpFrame.bytes));
     };
     listener.onKeyframeNeeded = () => {
@@ -393,12 +400,10 @@ export class ClientSession {
       }
       const video = decodeVideo(frame.payload);
       this.stats.onVideo(frame.payload.length);
-      if (!Number.isNaN(this.clockOffsetMicros)) {
-        const nowMicros = Date.now() * 1000;
-        const e2eMicros = nowMicros - this.clockOffsetMicros - video.header.captureTsMicros;
-        if (e2eMicros >= 0 && e2eMicros <= MAX_E2E_MS * 1000) {
-          this.stats.setE2eMs(Math.floor(e2eMicros / 1000));
-        }
+      const e2e = frameE2eMs(Date.now() * 1000, this.clockOffsetMicros,
+        video.header.captureTsMicros, MAX_E2E_MS);
+      if (e2e >= 0) {
+        this.stats.setE2eMs(e2e);
       }
       this.listener.onVideo(video);
     } else if (frame.type === MessageType.PING) {

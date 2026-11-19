@@ -147,6 +147,13 @@ final class UdpProtocolTests: XCTestCase {
         }
     }
 
+    func testCaptureTimestampRoundTrips() throws {
+        let header = UdpVideoHeader(seq: 1, frameID: 2, fragIndex: 0, fragCount: 1, flags: UdpFlags.key,
+                                    payloadLength: 2, captureTsMicros: 1_700_000_000_123_456)
+        let decoded = try decodeUdpDatagram(try encodeUdpDatagram(UdpDatagram(header: header, payload: Data([1, 2]))))
+        XCTAssertEqual(decoded.header.captureTsMicros, 1_700_000_000_123_456)
+    }
+
     func testUdpConfigRoundTrip() throws {
         let config = UdpConfig(
             port: 7778,

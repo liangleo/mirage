@@ -36,6 +36,7 @@ public:
     struct Frame {
         uint32_t frameId = 0;
         bool keyFrame = false;
+        uint64_t captureTsMicros = 0;
         std::vector<uint8_t> data;
     };
     using FrameSink = std::function<void(Frame &&)>;
@@ -52,6 +53,7 @@ private:
     struct PendingFrame {
         uint16_t fragCount = 0;
         bool keyFrame = false;
+        uint64_t captureTsMicros = 0;
         std::vector<std::vector<uint8_t>> frags;
         std::vector<bool> got;
         uint16_t received = 0;

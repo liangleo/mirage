@@ -264,8 +264,9 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
 
 - `UDP_CONFIG`（type 12）到达后，客户端把 host/port/key/noncePrefix 交给 native（`udp_receiver.cpp`）；
   仅 Wi-Fi 且非回环地址时启用。
-- 线格式与 Mac 端一致：16B 大端头（seq/frameID/fragIndex/fragCount/flags/payloadLength）+ AES-256-GCM 密文与 tag；
-  AAD 为 16B 头，nonce = noncePrefix(4) + seq(u64 BE)；分片 ≤1200B。
+- 线格式与 Mac 端一致：24B 大端头（seq/frameID/fragIndex/fragCount/flags/payloadLength + `captureTsMicros u64`）
+  + AES-256-GCM 密文与 tag；AAD 为整个 24B 头，nonce = noncePrefix(4) + seq(u64 BE)；分片 ≤1200B。
+  末尾的采集时间戳让 UDP 帧也能算 e2e 与 p95（此前只有 TCP 的 VIDEO 头带时间戳）。
 - native 侧 UDP socket 为非阻塞、每次读事件最多排空 64 个数据报：阻塞读会长期占住
   sender 串行队列，导致排队中的视频发送永远执行不到（只有 HELLO ACK 能发出去）。
 - 握手：native 每 500ms 发一次 HELLO（无载荷），**收到第一个完整视频帧前一直重发**（TLS 重连会复位服务端的 udpPeerReady）；
@@ -278,7 +279,7 @@ Mac 端配合：AOA 桥常驻等待 USB 设备（无设备不再退出），这�
   服务端重传计数每累计 40 次也会主动请求关键帧（≤1 次/500ms），缩短花屏时间。
 - 回退：HELLO 后 30s 仍无视频帧，或已出帧后 10s 无数据报 → native 报 `udpFailed`，客户端发 `CTRL UDP_FAILED`，
   服务端恢复 TCP 视频。
-- 统计：UDP 帧没有采集时间戳，`e2e`/`p95` 显示 `--`；fps、码率、解码耗时、RTT 正常。
+- 统计：UDP 帧头带采集时间戳，`e2e`/`p95` 与 TCP 模式一致可用（时钟偏移来自 PING 回包）。
 
 ### 7.5 Mac 端服务模型（本轮落地）
 

@@ -208,6 +208,19 @@ export function decodeUdpConfig(payload: Uint8Array): UdpConfig {
   return config;
 }
 
+// 由采集时间戳和时钟偏移算端到端延迟（ms）；不可用时返回 -1。
+export function frameE2eMs(nowMicros: number, clockOffsetMicros: number,
+  captureTsMicros: number, maxMs: number): number {
+  if (Number.isNaN(clockOffsetMicros) || captureTsMicros <= 0) {
+    return -1;
+  }
+  const e2e = nowMicros - clockOffsetMicros - captureTsMicros;
+  if (e2e < 0 || e2e > maxMs * 1000) {
+    return -1;
+  }
+  return Math.floor(e2e / 1000);
+}
+
 export class VideoHeader {
   codec: number = 0;
   flags: number = 0;

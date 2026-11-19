@@ -1,6 +1,6 @@
 import { CtrlCode } from '../../../main/ets/core/InputProtocol';
 import { describe, it, expect } from '@ohos/hypium';
-import { FrameDecoder, MessageType, Hello, encodeHello, encodeFeedback, encodePing, decodePing, decodeSessionConfig, decodeVideo, encodeFrame, decodeUdpConfig } from '../../../main/ets/core/Protocol';
+import { FrameDecoder, MessageType, Hello, encodeHello, encodeFeedback, encodePing, decodePing, decodeSessionConfig, decodeVideo, encodeFrame, decodeUdpConfig, frameE2eMs } from '../../../main/ets/core/Protocol';
 
 const VECTOR_HELLO =
   '0000002701010001000102030405060708090a0b0c0d0e0f0a00064000f000f03c010000064d6972616765';
@@ -262,6 +262,22 @@ export default function protocolTest() {
     it('exposes the udp control codes', 0, () => {
       expect(CtrlCode.UDP_FAILED).assertEqual(5);
       expect(CtrlCode.UDP_READY).assertEqual(6);
+    });
+  });
+
+  describe('e2e', () => {
+    it('computes end-to-end from capture timestamp', 0, () => {
+      expect(frameE2eMs(1_000_000_000, 0, 999_980_000, 10000)).assertEqual(20);
+    });
+
+    it('rejects missing timestamps and clock offsets', 0, () => {
+      expect(frameE2eMs(1_000_000, 0, 0, 10000)).assertEqual(-1);
+      expect(frameE2eMs(1_000_000, NaN, 500, 10000)).assertEqual(-1);
+    });
+
+    it('rejects absurd values', 0, () => {
+      expect(frameE2eMs(1_000, 0, 2_000, 10000)).assertEqual(-1);
+      expect(frameE2eMs(20_000_000, 0, 0 + 1, 10)).assertEqual(-1);
     });
   });
 }

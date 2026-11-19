@@ -20,7 +20,7 @@ public enum UdpError: Error, Equatable {
 }
 
 public struct UdpVideoHeader: Equatable, Sendable {
-    public static let size = 16
+    public static let size = 24
     public static let maxPayload = 1200
     public static let maxDatagramPayload = maxPayload + 16
 
@@ -31,6 +31,8 @@ public struct UdpVideoHeader: Equatable, Sendable {
     public let flags: UInt8
     public let reserved: UInt8
     public let payloadLength: UInt16
+    /// 采集时间戳（微秒）：UDP 帧没有 TCP 的 VIDEO 头，用它恢复 e2e/p95。
+    public let captureTsMicros: UInt64
 
     public init(
         seq: UInt32,
@@ -39,7 +41,8 @@ public struct UdpVideoHeader: Equatable, Sendable {
         fragCount: UInt16,
         flags: UInt8,
         reserved: UInt8 = 0,
-        payloadLength: UInt16
+        payloadLength: UInt16,
+        captureTsMicros: UInt64 = 0
     ) {
         self.seq = seq
         self.frameID = frameID
@@ -48,6 +51,7 @@ public struct UdpVideoHeader: Equatable, Sendable {
         self.flags = flags
         self.reserved = reserved
         self.payloadLength = payloadLength
+        self.captureTsMicros = captureTsMicros
     }
 
     public var isNack: Bool { flags & UdpFlags.nack != 0 }
@@ -76,6 +80,7 @@ public func encodeUdpHeader(_ header: UdpVideoHeader) -> Data {
     data.append(header.flags)
     data.append(header.reserved)
     data.appendUInt16BE(header.payloadLength)
+    data.appendUInt64BE(header.captureTsMicros)
     return data
 }
 
@@ -102,7 +107,8 @@ public func decodeUdpDatagram(_ data: Data) throws -> UdpDatagram {
         fragCount: data.readUInt16BE(10),
         flags: data[12],
         reserved: data[13],
-        payloadLength: UInt16(payloadLength)
+        payloadLength: UInt16(payloadLength),
+        captureTsMicros: data.readUInt64BE(16)
     )
     guard header.fragCount > 0 else { throw UdpError.malformed }
     if header.isNack {

@@ -16,7 +16,7 @@
 #include <hilog/log.h>
 
 namespace {
-constexpr size_t kHeaderSize = 16;
+constexpr size_t kHeaderSize = 24;
 constexpr uint16_t kMaxPayload = 1200 + 16;
 constexpr uint8_t kFlagSof = 1 << 0;
 constexpr uint8_t kFlagEof = 1 << 1;
@@ -31,6 +31,14 @@ int64_t NowMs() {
 
 uint16_t Read16(const uint8_t *p) {
     return static_cast<uint16_t>((p[0] << 8) | p[1]);
+}
+
+uint64_t Read64(const uint8_t *p) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) {
+        v = (v << 8) | p[i];
+    }
+    return v;
 }
 
 uint32_t Read32(const uint8_t *p) {
@@ -259,6 +267,7 @@ void UdpReceiver::HandleDatagram(const uint8_t *data, size_t length) {
         return;
     }
 
+    const uint64_t captureTs = Read64(data + 16);
     const uint8_t *payload = data + kHeaderSize;
     const size_t cipherLen = payloadLength - 16;
     const uint8_t *tag = payload + cipherLen;
@@ -297,6 +306,9 @@ void UdpReceiver::HandleDatagram(const uint8_t *data, size_t length) {
     }
     if (fragIndex == 0) {
         pending.keyFrame = (flags & kFlagKey) != 0;
+    }
+    if (pending.captureTsMicros == 0) {
+        pending.captureTsMicros = captureTs;
     }
     if ((flags & kFlagEof) != 0) {
         pending.eof = true;
@@ -340,6 +352,7 @@ void UdpReceiver::DeliverReadyFrames() {
         Frame frame;
         frame.frameId = bestId;
         frame.keyFrame = pending.keyFrame;
+        frame.captureTsMicros = pending.captureTsMicros;
         size_t total = 0;
         for (const auto &frag : pending.frags) {
             total += frag.size();

@@ -145,7 +145,8 @@ public final class UdpVideoSender: @unchecked Sendable {
                 fragIndex: UInt16(index),
                 fragCount: UInt16(fragCount),
                 flags: flags,
-                payloadLength: UInt16(chunk.count + 16)
+                payloadLength: UInt16(chunk.count + 16),
+                captureTsMicros: frame.header.captureTimestampMicros
             )
             do {
                 let sealed = try udpSeal(chunk, header: header, key: key, noncePrefix: noncePrefix)

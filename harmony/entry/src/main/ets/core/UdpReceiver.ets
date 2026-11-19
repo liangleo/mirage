@@ -5,11 +5,13 @@ export class UdpFrame {
   frameId: number;
   keyFrame: boolean;
   bytes: Uint8Array;
+  captureTsMicros: number;
 
-  constructor(frameId: number, keyFrame: boolean, bytes: Uint8Array) {
+  constructor(frameId: number, keyFrame: boolean, bytes: Uint8Array, captureTsMicros: number = 0) {
     this.frameId = frameId;
     this.keyFrame = keyFrame;
     this.bytes = bytes;
+    this.captureTsMicros = captureTsMicros;
   }
 }
 

@@ -22,6 +22,7 @@ export interface UdpEvent {
   kind: string;
   frameId?: number;
   key?: boolean;
+  captureTs?: number;
   data?: ArrayBuffer;
   reason?: string;
 }

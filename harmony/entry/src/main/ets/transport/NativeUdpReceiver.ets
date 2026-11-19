@@ -44,7 +44,8 @@ export class NativeUdpReceiver implements UdpReceiver {
     }
     if (event.kind === 'udpFrame' && event.data !== undefined) {
       listener.onFrame(new UdpFrame(event.frameId !== undefined ? event.frameId : 0,
-        event.key === true, new Uint8Array(event.data)));
+        event.key === true, new Uint8Array(event.data),
+        event.captureTs !== undefined ? event.captureTs : 0));
     }
   }
 }

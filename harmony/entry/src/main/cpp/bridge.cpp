@@ -283,6 +283,7 @@ struct UdpEventPayload {
     std::string kind;
     uint32_t frameId = 0;
     bool key = false;
+    double captureTs = 0;
     std::vector<uint8_t> data;
     std::string reason;
 };
@@ -312,6 +313,8 @@ void CallJsUdp(napi_env env, napi_value jsCallback, void *, void *raw) {
         napi_set_named_property(env, event, "frameId", value);
         napi_get_boolean(env, payload->key, &value);
         napi_set_named_property(env, event, "key", value);
+        napi_create_double(env, payload->captureTs, &value);
+        napi_set_named_property(env, event, "captureTs", value);
         void *bytes = nullptr;
         napi_value buffer;
         napi_create_arraybuffer(env, payload->data.size(), &bytes, &buffer);
@@ -385,6 +388,7 @@ napi_value StartUdp(napi_env env, napi_callback_info info) {
             payload.kind = "udpFrame";
             payload.frameId = frame.frameId;
             payload.key = frame.keyFrame;
+            payload.captureTs = static_cast<double>(frame.captureTsMicros);
             payload.data = std::move(frame.data);
             PostUdpEvent(std::move(payload));
         },
