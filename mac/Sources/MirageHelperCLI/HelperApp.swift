@@ -315,28 +315,36 @@ public final class HelperApp: @unchecked Sendable {
     }
 
     private func makeVirtualDisplay() throws -> CGDirectDisplayID {
-        do {
-            let created = try VirtualDisplay(
-                pointWidth: pointWidth,
-                pointHeight: pointHeight,
-                name: "Mirage"
-            )
-            if waitForDisplay(created.displayID, timeout: 5.0) {
-                virtualDisplay = created
-                positionVirtualDisplay(created.displayID)
-                print("extend display=\(created.displayID) points=\(pointWidth)x\(pointHeight)")
+        // 快速重启时上一块虚拟屏可能还没被系统回收，直接创建会失败。
+        // 重试几次再回退镜像，避免把可恢复的竞态报成 create_failed。
+        for attempt in 1...3 {
+            do {
+                let created = try VirtualDisplay(
+                    pointWidth: pointWidth,
+                    pointHeight: pointHeight,
+                    name: "Mirage"
+                )
+                if waitForDisplay(created.displayID, timeout: 5.0) {
+                    virtualDisplay = created
+                    positionVirtualDisplay(created.displayID)
+                    print("extend display=\(created.displayID) points=\(pointWidth)x\(pointHeight) attempt=\(attempt)")
+                    fflush(stdout)
+                    return created.displayID
+                }
+                print("extend_retry=not_online attempt=\(attempt)")
                 fflush(stdout)
-                return created.displayID
+                created.destroy()
+            } catch {
+                print("extend_retry=create_failed attempt=\(attempt) error=\(error)")
+                fflush(stdout)
             }
-            print("extend_fallback=not_online after 5s; streaming main display instead")
-            fflush(stdout)
-            created.destroy()
-            return displayID
-        } catch {
-            print("extend_fallback=create_failed")
-            fflush(stdout)
-            return displayID
+            if attempt < 3 {
+                Thread.sleep(forTimeInterval: 1.0)
+            }
         }
+        print("extend_fallback=create_failed after 3 attempts; streaming main display instead")
+        fflush(stdout)
+        return displayID
     }
 
     private func positionVirtualDisplay(_ id: CGDirectDisplayID) {
