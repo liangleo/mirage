@@ -7,7 +7,8 @@ data class StatsSnapshot(
     val dropped: Int = 0,
     val e2eMs: Long = -1,
     val rttMs: Long = -1,
-    val codec: String = ""
+    val codec: String = "",
+    val e2eP95Ms: Long = -1
 )
 
 class StreamStats {
@@ -23,6 +24,13 @@ class StreamStats {
 
     @Volatile
     private var e2eMs = -1L
+
+    @Volatile
+    private var queueDepth = 0
+
+    private var reportedDropped = 0
+
+    private val e2eSamples = ArrayDeque<Long>()
 
     @Volatile
     private var rttMs = -1L
@@ -48,8 +56,12 @@ class StreamStats {
         decodeMs = value
     }
 
+    @Synchronized
     fun setE2eMs(value: Long) {
         e2eMs = value
+        if (value < 0) return
+        if (e2eSamples.size == MAX_E2E_SAMPLES) e2eSamples.removeFirst()
+        e2eSamples.addLast(value)
     }
 
     fun setRttMs(value: Long) {
@@ -62,6 +74,19 @@ class StreamStats {
 
     val currentDecodeMs: Long get() = decodeMs
     val currentRttMs: Long get() = rttMs
+    val currentE2eMs: Long get() = e2eMs
+    val currentQueueDepth: Int get() = queueDepth
+
+    fun setQueueDepth(value: Int) {
+        queueDepth = value
+    }
+
+    @Synchronized
+    fun takeDroppedFrames(): Int {
+        val delta = dropped - reportedDropped
+        reportedDropped = dropped
+        return delta
+    }
 
     @Synchronized
     fun snapshot(nowMs: Long = System.currentTimeMillis()): StatsSnapshot {
@@ -74,6 +99,17 @@ class StreamStats {
         frames = 0
         bytes = 0
         lastTickMs = nowMs
-        return StatsSnapshot(fps, decodeMs, bitrateMbps, dropped, e2eMs, rttMs, codecLabel)
+        return StatsSnapshot(fps, decodeMs, bitrateMbps, dropped, e2eMs, rttMs, codecLabel, p95())
+    }
+
+    private fun p95(): Long {
+        if (e2eSamples.isEmpty()) return -1
+        val sorted = e2eSamples.sorted()
+        val rank = (sorted.size * 95 + 99) / 100 - 1
+        return sorted[rank.coerceIn(0, sorted.lastIndex)]
+    }
+
+    private companion object {
+        const val MAX_E2E_SAMPLES = 300
     }
 }

@@ -5,6 +5,7 @@ export class InputGate {
   reason: string = '';
   private connected: boolean = false;
   private localEnabled: boolean = true;
+  private keyboardEnabled: boolean = true;
   private serverEnabled: boolean = true;
 
   setConnected(value: boolean): void {
@@ -17,6 +18,10 @@ export class InputGate {
 
   getLocalEnabled(): boolean {
     return this.localEnabled;
+  }
+
+  setKeyboardEnabled(value: boolean): void {
+    this.keyboardEnabled = value;
   }
 
   getServerEnabled(): boolean {
@@ -40,6 +45,10 @@ export class InputGate {
 
   allow(): boolean {
     return this.connected && this.localEnabled && this.serverEnabled;
+  }
+
+  allowKeyboard(): boolean {
+    return this.connected && this.keyboardEnabled && this.serverEnabled;
   }
 
   allowRelease(): boolean {

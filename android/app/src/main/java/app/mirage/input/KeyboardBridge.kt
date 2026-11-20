@@ -14,6 +14,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import androidx.activity.ComponentActivity
 import app.mirage.net.InputEvent
+import app.mirage.ui.KeyFilter
 
 /** Bridges the soft IME and hardware keyboard to wire input events. */
 class KeyboardBridge(
@@ -71,13 +72,7 @@ class KeyboardBridge(
 
     fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (!enabled) return false
-        if (event.keyCode == KeyEvent.KEYCODE_BACK) return false
-        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
-            event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
-            event.keyCode == KeyEvent.KEYCODE_VOLUME_MUTE
-        ) {
-            return false
-        }
+        if (!KeyFilter.shouldHandle(event.keyCode)) return false
         val action = when (event.action) {
             KeyEvent.ACTION_DOWN -> ImeDispatcher.ACTION_DOWN
             KeyEvent.ACTION_UP -> ImeDispatcher.ACTION_UP

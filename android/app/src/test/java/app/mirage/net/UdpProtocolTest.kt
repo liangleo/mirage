@@ -41,7 +41,31 @@ class UdpProtocolTest {
 
         val decoded = UdpProtocol.decode(encoded)
         assertEquals(header, decoded.header)
+        assertEquals(0L, decoded.header.captureTsMicros)
         assertArrayEquals(payload, decoded.payload)
+    }
+
+    @Test
+    fun captureTimestampRoundTrips() {
+        val header = UdpVideoHeader(
+            seq = 1,
+            frameID = 2,
+            fragIndex = 0,
+            fragCount = 1,
+            flags = UdpFlags.SOF or UdpFlags.EOF,
+            payloadLength = 4,
+            captureTsMicros = 1_700_000_000_123L
+        )
+        val encoded = UdpProtocol.encode(UdpDatagram(header, byteArrayOf(1, 2, 3, 4)))
+        assertEquals(UdpVideoHeader.SIZE + 4, encoded.size)
+        assertEquals(1_700_000_000_123L, UdpProtocol.decode(encoded).header.captureTsMicros)
+    }
+
+    @Test
+    fun truncated24ByteHeaderIsRejected() {
+        assertThrows(ProtocolException::class.java) {
+            UdpProtocol.decode(ByteArray(UdpVideoHeader.SIZE - 1))
+        }
     }
 
     @Test
@@ -120,7 +144,7 @@ class UdpProtocolTest {
             UdpProtocol.encode(UdpDatagram(header, ByteArray(1217)))
         }
         val sealed = UdpVideoHeader(seq = 1, frameID = 1, fragIndex = 0, fragCount = 1, flags = 0, payloadLength = 1216)
-        assertEquals(16 + 1216, UdpProtocol.encode(UdpDatagram(sealed, ByteArray(1216))).size)
+        assertEquals(24 + 1216, UdpProtocol.encode(UdpDatagram(sealed, ByteArray(1216))).size)
     }
 
     @Test

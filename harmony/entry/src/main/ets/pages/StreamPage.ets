@@ -328,6 +328,7 @@ struct StreamPage {
     const session = Runtime.session;
     if (session !== null) {
       session.setInputEnabled(this.inputActive());
+      session.setKeyboardEnabled(this.keyboardReady());
     }
   }
 
@@ -342,6 +343,10 @@ struct StreamPage {
     }
   }
 
+  private keyboardReady(): boolean {
+    return (Runtime.config.inputCaps & 0x06) !== 0 && this.gateEnabled;
+  }
+
   private inputReady(): boolean {
     return this.capsOk && this.gateEnabled;
   }
@@ -349,21 +354,21 @@ struct StreamPage {
   
   // 白 = 已开启，灰 = 未开启/不可用；断开用 normal→danger 表示警告
   private inputGlyph(): Resource {
-    return this.inputOn && this.inputReady() ? $r('app.media.ic_input_normal') :
+    return this.inputOn && this.inputReady() ? $r('app.media.ic_input_active') :
       $r('app.media.ic_input_disabled');
   }
 
   private keyboardGlyph(): Resource {
-    return this.keyboardOn && this.capsOk ? $r('app.media.ic_keyboard_normal') :
+    return this.keyboardOn && this.capsOk ? $r('app.media.ic_keyboard_active') :
       $r('app.media.ic_keyboard_disabled');
   }
 
   private debugGlyph(): Resource {
-    return this.debugOn ? $r('app.media.ic_debug_normal') : $r('app.media.ic_debug_disabled');
+    return this.debugOn ? $r('app.media.ic_debug_active') : $r('app.media.ic_debug_disabled');
   }
 
   private disconnectGlyph(): Resource {
-    return this.confirmDisconnect ? $r('app.media.ic_disconnect_danger') :
+    return this.confirmDisconnect ? $r('app.media.ic_disconnect_active') :
       $r('app.media.ic_disconnect_disabled');
   }
 
@@ -571,7 +576,7 @@ struct StreamPage {
 
       if (this.keyboardOn) {
         KeyboardDock({
-          inputEnabled: this.keyboardOn && this.inputActive(),
+          inputEnabled: this.keyboardOn && this.keyboardReady(),
           onText: (text: string) => {
             this.sendText(text);
           },
@@ -602,56 +607,74 @@ struct StreamPage {
       }
 
       // 右上角抽屉：收起时只剩齿轮，展开为 调试/输入/键盘/断开 + 关闭
-      Column({ space: 0 }) {
+      Column({ space: 6 }) {
         if (this.toolbarOpen) {
           Stack() {
-            Image(this.debugGlyph()).width(40).height(40)
+            Image(this.debugGlyph()).width(20).height(20)
           }
-          .width(40)
-          .height(40)
+          .width(32)
+          .height(32)
+          .backgroundColor('#99141A24')
+          .borderRadius(8)
+          .border({ width: 1, color: '#33FFFFFF' })
           .onClick(() => {
             this.toggleDebug();
           })
           Stack() {
-            Image(this.inputGlyph()).width(40).height(40)
+            Image(this.inputGlyph()).width(20).height(20)
           }
-          .width(40)
-          .height(40)
+          .width(32)
+          .height(32)
+          .backgroundColor('#99141A24')
+          .borderRadius(8)
+          .border({ width: 1, color: '#33FFFFFF' })
           .onClick(() => {
             this.toggleInput();
           })
           Stack() {
-            Image(this.keyboardGlyph()).width(40).height(40)
+            Image(this.keyboardGlyph()).width(20).height(20)
           }
-          .width(40)
-          .height(40)
+          .width(32)
+          .height(32)
+          .backgroundColor('#99141A24')
+          .borderRadius(8)
+          .border({ width: 1, color: '#33FFFFFF' })
           .onClick(() => {
             this.toggleKeyboard();
           })
           Stack() {
-            Image(this.disconnectGlyph()).width(40).height(40)
+            Image(this.disconnectGlyph()).width(20).height(20)
           }
-          .width(40)
-          .height(40)
+          .width(32)
+          .height(32)
+          .backgroundColor('#99141A24')
+          .borderRadius(8)
+          .border({ width: 1, color: '#33FFFFFF' })
           .onClick(() => {
             this.requestDisconnect();
           })
         }
         if (this.toolbarOpen) {
           Stack() {
-            Image($r('app.media.ic_close_normal')).width(40).height(40)
+            Image($r('app.media.ic_close_normal')).width(20).height(20)
           }
-          .width(40)
-          .height(40)
+          .width(32)
+          .height(32)
+          .backgroundColor('#99141A24')
+          .borderRadius(8)
+          .border({ width: 1, color: '#33FFFFFF' })
           .onClick(() => {
             this.toolbarOpen = false;
           })
         } else {
           Stack() {
-            Image($r('app.media.ic_gear_disabled')).width(20).height(20)
+            Image($r('app.media.ic_settings_normal')).width(20).height(20)
           }
-          .width(40)
-          .height(40)
+          .width(32)
+          .height(32)
+          .backgroundColor('#99141A24')
+          .borderRadius(8)
+          .border({ width: 1, color: '#33FFFFFF' })
           .onClick(() => {
             this.toolbarOpen = true;
           })

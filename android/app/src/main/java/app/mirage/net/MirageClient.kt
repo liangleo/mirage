@@ -45,11 +45,15 @@ class MirageClient(
     private var udpReceiver: UdpVideoReceiver? = null
 
     @Volatile
+    private var udpActive = false
+
+    @Volatile
     private var feedback: FeedbackReporter? = null
 
     private var lastPingAtMs = 0L
     private var pendingPingMicros: Long? = null
     private var pendingPingSentNanos: Long? = null
+    @Volatile
     private var clockOffsetMicros: Long? = null
 
     fun connect() {
@@ -93,6 +97,14 @@ class MirageClient(
         sendFrame(Messages.encodeFrame(MessageType.CTRL.id, byteArrayOf(Ctrl.RELEASE_ALL.toByte())))
     }
 
+    fun requestUsb() {
+        sendFrame(Messages.encodeFrame(MessageType.CTRL.id, byteArrayOf(Ctrl.USB_REQUEST.toByte())))
+    }
+
+    fun updateHello(hello: Hello) {
+        sendFrame(Messages.encodeHello(hello))
+    }
+
     private fun sendFrame(encoded: ByteArray) {
         val stream = output ?: return
         try {
@@ -114,6 +126,7 @@ class MirageClient(
         if (!config.isEnabled) return
 
         udpReceiver?.stop()
+        var self: UdpVideoReceiver? = null
         val receiver = UdpVideoReceiver(
             key = config.key,
             noncePrefix = config.noncePrefix,
@@ -121,19 +134,27 @@ class MirageClient(
             onFrame = { frame ->
                 feedback?.onVideo(frame.annexB.size)
                 stats.onVideo(frame.annexB.size)
+                noteE2e(frame.header.captureTimestampMicros)
                 listener.onVideo(frame)
             },
             onReady = {
+                udpActive = true
                 listener.onUdpReady(true)
                 sendFrame(Messages.encodeFrame(MessageType.CTRL.id, byteArrayOf(Ctrl.UDP_READY.toByte())))
                 requestKeyframe()
             },
+            onKeyframeNeeded = { requestKeyframe() },
             onFailure = {
-                udpReceiver = null
-                listener.onUdpReady(false)
-                sendFrame(Messages.encodeFrame(MessageType.CTRL.id, byteArrayOf(Ctrl.UDP_FAILED.toByte())))
+                if (udpReceiver === self) {
+                    udpActive = false
+                    udpReceiver?.stop()
+                    udpReceiver = null
+                    listener.onUdpReady(false)
+                    sendFrame(Messages.encodeFrame(MessageType.CTRL.id, byteArrayOf(Ctrl.UDP_FAILED.toByte())))
+                }
             }
         )
+        self = receiver
         udpReceiver = receiver
         try {
             receiver.start(host, config.port)
@@ -150,6 +171,16 @@ class MirageClient(
             connection?.close()
         } catch (_: Exception) {
         }
+    }
+
+    private fun noteE2e(captureTsMicros: Long) {
+        val offset = clockOffsetMicros ?: return
+        val value = E2e.compute(
+            nowMicros = SystemClock.elapsedRealtimeNanos() / 1000,
+            offsetMicros = offset,
+            captureTsMicros = captureTsMicros
+        )
+        if (value >= 0) stats.setE2eMs(value)
     }
 
     private fun maybeSendPing(stream: OutputStream) {
@@ -219,7 +250,10 @@ class MirageClient(
                 send = { feedback -> sendFrame(UdpProtocol.encodeFeedback(feedback)) },
                 lossPermille = { udpReceiver?.lossPermille ?: 0 },
                 decodeMS = { stats.currentDecodeMs.toInt() },
-                rttMS = { stats.currentRttMs.toInt() }
+                rttMS = { stats.currentRttMs.toInt() },
+                droppedFrames = { stats.takeDroppedFrames() },
+                queueDepth = { stats.currentQueueDepth },
+                arrivalDelayMS = { stats.currentE2eMs.coerceAtLeast(0).toInt() }
             )
             feedback = reporter
             reporter.start()
@@ -246,21 +280,17 @@ class MirageClient(
                 while (true) {
                     val frame = decoder.next() ?: break
                     liveness.noteActivity(System.currentTimeMillis())
+                    udpReceiver?.noteSessionActive()
                     when (frame.type) {
                         MessageType.SESSION_CONFIG.id ->
                             listener.onConfig(Messages.decodeSessionConfig(frame.payload))
 
                         MessageType.VIDEO.id -> {
+                            if (udpActive) continue
                             val video = Messages.decodeVideo(frame.payload)
                             stats.onVideo(frame.payload.size)
                             feedback?.onVideo(frame.payload.size)
-                            clockOffsetMicros?.let { offset ->
-                                val nowMicros = SystemClock.elapsedRealtimeNanos() / 1000
-                                val e2eMicros = nowMicros - offset - video.header.captureTimestampMicros
-                                if (e2eMicros in 0..10_000_000) {
-                                    stats.setE2eMs(e2eMicros / 1000)
-                                }
-                            }
+                            noteE2e(video.header.captureTimestampMicros)
                             listener.onVideo(video)
                         }
 
@@ -301,6 +331,7 @@ class MirageClient(
             }
         } finally {
             running = false
+            udpActive = false
             feedback?.stop()
             feedback = null
             udpReceiver?.stop()

@@ -15,21 +15,24 @@ class UdpVideoReceiver(
     private val onFrame: (VideoFrame) -> Unit,
     private val onReady: () -> Unit = {},
     private val onFailure: (String) -> Unit = {},
+    private val onKeyframeNeeded: () -> Unit = {},
     private val onLog: ((String) -> Unit)? = null,
-    private val clockNanos: () -> Long = System::nanoTime,
-    private val rttNanos: () -> Long = { 30_000_000L }
+    private val clockNanos: () -> Long = System::nanoTime
 ) {
     private class Partial(val fragCount: Int, val firstSeenNanos: Long) {
         val fragments = arrayOfNulls<ByteArray>(fragCount)
-        val nacked = BooleanArray(fragCount)
         var received = 0
         var keyFrame = false
+        var captureTsMicros = 0L
+        var eofSeen = false
+        var triggerNanos: Long? = null
+        var nackRounds = 0
     }
 
     private val lock = Any()
     private val partials = LinkedHashMap<Long, Partial>()
     private val outbox = ArrayDeque<ByteArray>()
-    private var lastNackNanos = 0L
+    private var lastNackNanos = -1L
 
     @Volatile
     private var socket: DatagramSocket? = null
@@ -40,6 +43,15 @@ class UdpVideoReceiver(
     @Volatile
     private var ready = false
 
+    @Volatile
+    private var failureReported = false
+    private var firstActivityNanos = -1L
+    private var lastDatagramNanos = -1L
+
+    @Volatile
+    private var streamStartedNanos = -1L
+    private var nextDeliverId = -1L
+    private var gapSinceNanos = -1L
     private var thread: Thread? = null
 
     var framesDelivered = 0L
@@ -57,7 +69,7 @@ class UdpVideoReceiver(
     // Lifetime totals never decay, so a single early burst would pin the
     // server's adaptive bitrate at the floor forever. lossPermille is the
     // ratio over the current ~1s window instead.
-    private var windowStartNanos = 0L
+    private var windowStartNanos = -1L
     private var windowReceived = 0L
     private var windowLost = 0L
 
@@ -67,6 +79,7 @@ class UdpVideoReceiver(
     fun start(host: String, port: Int) {
         stop()
         running = true
+        markActivity(clockNanos())
         val address = InetAddress.getByName(host)
         val datagramSocket = DatagramSocket()
         datagramSocket.soTimeout = 50
@@ -86,9 +99,15 @@ class UdpVideoReceiver(
         synchronized(lock) {
             partials.clear()
             outbox.clear()
-            windowStartNanos = 0
+            windowStartNanos = -1
             windowReceived = 0
             windowLost = 0
+            failureReported = false
+            firstActivityNanos = -1
+            lastDatagramNanos = -1
+            streamStartedNanos = -1
+            nextDeliverId = -1
+            gapSinceNanos = -1
         }
         ready = false
     }
@@ -100,12 +119,10 @@ class UdpVideoReceiver(
         } catch (_: Exception) {
             return emptyList()
         }
+        markActivity(nowNanos)
+        lastDatagramNanos = nowNanos
         if (datagram.header.isHello) {
-            if (!ready) {
-                ready = true
-                onLog?.invoke("udp ready")
-                onReady()
-            }
+            onLog?.invoke("udp peer ready")
             return emptyList()
         }
         if (datagram.header.isNack) return emptyList()
@@ -128,15 +145,13 @@ class UdpVideoReceiver(
         synchronized(lock) {
             rollWindow(nowNanos)
             val frameID = header.frameID
-            if (frameID <= lastCompletedFrameId) return emptyList()
+            if (nextDeliverId < 0) nextDeliverId = frameID
+            if (frameID < nextDeliverId) return emptyList()
+
             val partial = partials[frameID] ?: run {
                 if (partials.size >= MAX_IN_FLIGHT) {
                     val oldest = partials.entries.first()
-                    val missing = oldest.value.fragments.count { it == null }
-                    fragmentsLost += missing
-                    windowLost += missing
-                    partials.remove(oldest.key)
-                    updateLoss()
+                    dropPartial(oldest.key, oldest.value)
                     onLog?.invoke("drop frame ${oldest.key} (too many in flight)")
                 }
                 Partial(header.fragCount, nowNanos).also { partials[frameID] = it }
@@ -149,73 +164,43 @@ class UdpVideoReceiver(
 
             partial.fragments[header.fragIndex] = plain
             partial.received++
+            if (partial.received == 1) partial.captureTsMicros = header.captureTsMicros
             if (header.isKeyFrame) partial.keyFrame = true
+            if (header.isEOF) {
+                partial.eofSeen = true
+                if (partial.triggerNanos == null) partial.triggerNanos = nowNanos
+            }
             fragmentsReceived++
             windowReceived++
             updateLoss()
 
-            if (partial.received == partial.fragCount) {
-                assemble(frameID, partial)
+            for (entry in partials) {
+                if (entry.key >= frameID) break
+                if (entry.value.received < entry.value.fragCount && entry.value.triggerNanos == null) {
+                    entry.value.triggerNanos = nowNanos
+                }
             }
+
+            deliverReady(nowNanos)
         }
         return drainOutbox()
     }
 
-    /** Emits NACKs for frames that stayed incomplete, and drops frames past their deadline. */
+    /** Emits NACKs for frames that stayed incomplete, delivers ready frames, and checks timeouts. */
     fun tick(nowNanos: Long = clockNanos()): List<ByteArray> {
+        markActivity(nowNanos)
         synchronized(lock) {
             rollWindow(nowNanos)
-            val deadline = maxOf(rttNanos() * 3, 150_000_000L)
-            val nackAfter = maxOf(rttNanos(), 20_000_000L)
-
-            partials.entries.removeAll { (frameID, partial) ->
-                if (nowNanos - partial.firstSeenNanos <= deadline) return@removeAll false
-                val missing = partial.fragments.count { it == null }
-                fragmentsLost += missing
-                windowLost += missing
-                updateLoss()
-                onLog?.invoke("drop frame $frameID (deadline)")
-                true
-            }
-
-            val iterator = partials.iterator()
-            while (iterator.hasNext()) {
-                val (frameID, partial) = iterator.next()
-                val waited = nowNanos - partial.firstSeenNanos
-                if (waited < nackAfter || nowNanos - lastNackNanos < NACK_INTERVAL_NANOS) continue
-
-                var firstMissing = -1
-                var lastMissing = -1
-                for (index in 0 until partial.fragCount) {
-                    if (partial.fragments[index] == null && !partial.nacked[index]) {
-                        if (firstMissing < 0) firstMissing = index
-                        lastMissing = index
-                    }
-                }
-                if (firstMissing < 0) continue
-
-                val length = lastMissing - firstMissing + 1
-                val bitmap = ByteArray((length + 7) / 8)
-                for (index in firstMissing..lastMissing) {
-                    if (partial.fragments[index] != null) continue
-                    partial.nacked[index] = true
-                    val bit = index - firstMissing
-                    bitmap[bit / 8] = (bitmap[bit / 8].toInt() or (1 shl (bit % 8))).toByte()
-                }
-
-                outbox.add(
-                    UdpProtocol.encodeNack(
-                        seq = 0,
-                        frameID = frameID,
-                        bitmapStart = firstMissing,
-                        bitmap = bitmap
-                    )
-                )
-                lastNackNanos = nowNanos
-                break
-            }
+            deliverReady(nowNanos)
+            nackMissing(nowNanos)
+            checkFailure(nowNanos)
         }
         return drainOutbox()
+    }
+
+    /** Control-channel activity keeps UDP alive on static screens where no frames are sent. */
+    fun noteSessionActive(nowNanos: Long = clockNanos()) {
+        lastDatagramNanos = nowNanos
     }
 
     fun drainOutbox(): List<ByteArray> = synchronized(lock) {
@@ -225,12 +210,108 @@ class UdpVideoReceiver(
         items
     }
 
-    private fun assemble(frameID: Long, partial: Partial) {
+    private fun deliverReady(nowNanos: Long) {
+        while (nextDeliverId >= 0) {
+            val head = partials[nextDeliverId]
+            if (head != null && head.received == head.fragCount) {
+                deliver(nextDeliverId, head)
+                partials.remove(nextDeliverId)
+                nextDeliverId++
+                gapSinceNanos = -1
+                continue
+            }
+            if (head != null) {
+                if (nowNanos - head.firstSeenNanos > HEAD_TIMEOUT_NANOS) {
+                    dropPartial(nextDeliverId, head)
+                    onLog?.invoke("drop frame $nextDeliverId (missing fragments)")
+                    nextDeliverId++
+                    gapSinceNanos = -1
+                    onKeyframeNeeded()
+                    continue
+                }
+                return
+            }
+            val next = partials.keys.firstOrNull { it > nextDeliverId } ?: return
+            if (gapSinceNanos < 0) {
+                gapSinceNanos = nowNanos
+                return
+            }
+            if (nowNanos - gapSinceNanos <= HEAD_TIMEOUT_NANOS) return
+            fragmentsLost += (next - nextDeliverId)
+            windowLost += (next - nextDeliverId)
+            updateLoss()
+            onLog?.invoke("drop frames $nextDeliverId..${next - 1} (never arrived)")
+            nextDeliverId = next
+            gapSinceNanos = -1
+            onKeyframeNeeded()
+        }
+    }
+
+    private fun nackMissing(nowNanos: Long) {
+        if (lastNackNanos >= 0 && nowNanos - lastNackNanos < NACK_INTERVAL_NANOS) return
+        for (partial in partials.values) {
+            if (partial.received == partial.fragCount) continue
+            if (partial.nackRounds >= MAX_NACK_ROUNDS) continue
+            val trigger = partial.triggerNanos ?: continue
+            if (nowNanos - trigger < NACK_DELAY_NANOS) continue
+
+            var firstMissing = -1
+            var lastMissing = -1
+            for (index in 0 until partial.fragCount) {
+                if (partial.fragments[index] == null) {
+                    if (firstMissing < 0) firstMissing = index
+                    lastMissing = index
+                }
+            }
+            if (firstMissing < 0) continue
+
+            val bitmap = ByteArray((lastMissing - firstMissing + 8) / 8)
+            for (index in firstMissing..lastMissing) {
+                if (partial.fragments[index] != null) continue
+                val bit = index - firstMissing
+                bitmap[bit / 8] = (bitmap[bit / 8].toInt() or (1 shl (bit % 8))).toByte()
+            }
+            outbox.add(
+                UdpProtocol.encodeNack(
+                    seq = 0,
+                    frameID = partials.entries.first { it.value === partial }.key,
+                    bitmapStart = firstMissing,
+                    bitmap = bitmap
+                )
+            )
+            partial.nackRounds++
+            lastNackNanos = nowNanos
+            return
+        }
+    }
+
+    private fun checkFailure(nowNanos: Long) {
+        if (failureReported) return
+        if (streamStartedNanos < 0 && nowNanos - firstActivityNanos > START_TIMEOUT_NANOS) {
+            failureReported = true
+            onFailure("UDP 无响应")
+            return
+        }
+        if (streamStartedNanos >= 0 && nowNanos - lastDatagramNanos > SILENCE_TIMEOUT_NANOS) {
+            failureReported = true
+            onFailure("UDP 无数据")
+        }
+    }
+
+    private fun dropPartial(frameID: Long, partial: Partial) {
+        val missing = partial.fragments.count { it == null }
+        fragmentsLost += missing
+        windowLost += missing
+        partials.remove(frameID)
+        updateLoss()
+    }
+
+    private fun deliver(frameID: Long, partial: Partial) {
         val output = ByteArrayOutputStream()
         for (fragment in partial.fragments) {
             output.write(fragment!!)
         }
-        partials.remove(frameID)
+        if (streamStartedNanos < 0) streamStartedNanos = partial.firstSeenNanos
         framesDelivered++
         lastCompletedFrameId = frameID
         val frame = VideoFrame(
@@ -238,15 +319,27 @@ class UdpVideoReceiver(
                 codec = 1,
                 flags = if (partial.keyFrame) 1 else 0,
                 frameID = frameID,
-                captureTimestampMicros = 0,
+                captureTimestampMicros = partial.captureTsMicros,
                 reserved = 0
             ),
             annexB = output.toByteArray()
         )
+        if (!ready) {
+            ready = true
+            onReady()
+        }
         onFrame(frame)
     }
 
+    private fun markActivity(nowNanos: Long) {
+        if (firstActivityNanos < 0) firstActivityNanos = nowNanos
+    }
+
     private fun rollWindow(nowNanos: Long) {
+        if (windowStartNanos < 0) {
+            windowStartNanos = nowNanos
+            return
+        }
         if (nowNanos - windowStartNanos < WINDOW_NANOS) return
         windowStartNanos = nowNanos
         windowReceived = 0
@@ -261,24 +354,20 @@ class UdpVideoReceiver(
     private fun loop(socket: DatagramSocket, address: InetAddress, port: Int) {
         val hello = helloDatagram()
         var lastHello = 0L
-        val startedAt = clockNanos()
         val buffer = ByteArray(2048)
 
         try {
             while (running) {
                 val now = clockNanos()
-                if (!ready && now - lastHello > 500_000_000L) {
+                if (streamStartedNanos < 0 && now - lastHello > 500_000_000L) {
                     socket.send(DatagramPacket(hello, hello.size, address, port))
                     lastHello = now
-                }
-                if (!ready && now - startedAt > 5_000_000_000L) {
-                    onFailure("UDP 无响应")
-                    return
                 }
 
                 for (datagram in tick(now)) {
                     socket.send(DatagramPacket(datagram, datagram.size, address, port))
                 }
+                if (failureReported) return
 
                 val packet = DatagramPacket(buffer, buffer.size)
                 try {
@@ -293,7 +382,7 @@ class UdpVideoReceiver(
                 }
             }
         } catch (error: Exception) {
-            if (running) onFailure(error.message ?: "UDP 接收失败")
+            if (running && !failureReported) onFailure(error.message ?: "UDP 接收失败")
         } finally {
             running = false
         }
@@ -314,8 +403,13 @@ class UdpVideoReceiver(
     )
 
     private companion object {
-        const val MAX_IN_FLIGHT = 3
+        const val MAX_IN_FLIGHT = 16
+        const val MAX_NACK_ROUNDS = 3
+        const val NACK_DELAY_NANOS = 6_000_000L
         const val NACK_INTERVAL_NANOS = 10_000_000L
+        const val HEAD_TIMEOUT_NANOS = 200_000_000L
+        const val START_TIMEOUT_NANOS = 30_000_000_000L
+        const val SILENCE_TIMEOUT_NANOS = 10_000_000_000L
         const val WINDOW_NANOS = 1_000_000_000L
     }
 }

@@ -5,6 +5,7 @@ import { Runtime } from '../core/Runtime';
 export struct StatsOverlay {
   @State private line1: string = 'Waiting for video';
   @State private line2: string = '';
+  @State private p95: string = 'p95 --';
   @State private transport: string = '';
   private timer: number = -1;
 
@@ -25,10 +26,10 @@ export struct StatsOverlay {
   private refresh(): void {
     const snap: StatsSnapshot = Runtime.stats.snapshot();
     const e2e = snap.e2eMs >= 0 ? `${snap.e2eMs}ms` : '--';
-    const p95 = snap.e2eP95Ms >= 0 ? ` · p95 ${snap.e2eP95Ms}ms` : '';
     const rtt = snap.rttMs >= 0 ? `${snap.rttMs}ms` : '--';
-    this.line1 = `${snap.fps} fps · ${snap.bitrateMbps.toFixed(1)} Mbps · drop ${snap.dropped}${p95}`;
+    this.line1 = `${snap.fps} fps · ${snap.bitrateMbps.toFixed(1)} Mbps · drop ${snap.dropped}`;
     this.line2 = `decode ${snap.decodeMs.toFixed(1)}ms · e2e ${e2e} · RTT ${rtt} · ${snap.codec}`;
+    this.p95 = snap.e2eP95Ms >= 0 ? `p95 ${snap.e2eP95Ms}ms` : 'p95 --';
     const resolution = Runtime.hasConfig ? `${Runtime.config.width}×${Runtime.config.height}` : '';
     this.transport = resolution.length > 0 ? `${Runtime.transportName} ${resolution}` : Runtime.transportName;
   }
@@ -41,7 +42,12 @@ export struct StatsOverlay {
         Text(this.transport).fontSize(12).fontColor('#AAAAAA')
       }
       .width('100%')
-      Text(this.line2).fontSize(13).fontColor('#BBBBBB')
+      Row() {
+        Text(this.line2).fontSize(13).fontColor('#BBBBBB')
+        Blank()
+        Text(this.p95).fontSize(12).fontColor('#AAAAAA')
+      }
+      .width('100%')
     }
     .width(420)
     .alignItems(HorizontalAlign.Start)

@@ -31,6 +31,58 @@ class StreamStatsTest {
         assertEquals(7, snapshot.decodeMs)
         assertEquals(1, snapshot.dropped)
     }
+
+    @Test
+    fun p95IsMinusOneWithoutSamples() {
+        val stats = StreamStats()
+        assertEquals(-1, stats.snapshot(nowMs = 1_000).e2eP95Ms)
+    }
+
+    @Test
+    fun p95UsesNearestRank() {
+        val stats = StreamStats()
+        for (value in 1L..100L) stats.setE2eMs(value)
+
+        assertEquals(95, stats.snapshot(nowMs = 1_000).e2eP95Ms)
+    }
+
+    @Test
+    fun p95IgnoresNegativeSamples() {
+        val stats = StreamStats()
+        stats.setE2eMs(-1)
+        assertEquals(-1, stats.snapshot(nowMs = 1_000).e2eP95Ms)
+
+        for (value in 1L..20L) stats.setE2eMs(value)
+        stats.setE2eMs(-1)
+        assertEquals(19, stats.snapshot(nowMs = 1_000).e2eP95Ms)
+    }
+
+    @Test
+    fun p95KeepsOnlyLatest300Samples() {
+        val stats = StreamStats()
+        for (value in 1L..400L) stats.setE2eMs(value)
+
+        assertEquals(385, stats.snapshot(nowMs = 1_000).e2eP95Ms)
+    }
+
+    @Test
+    fun reportsDroppedDeltaSinceLastRead() {
+        val stats = StreamStats()
+        stats.onDropped()
+        stats.onDropped()
+
+        assertEquals(2, stats.takeDroppedFrames())
+        assertEquals(0, stats.takeDroppedFrames())
+        stats.onDropped()
+        assertEquals(1, stats.takeDroppedFrames())
+    }
+
+    @Test
+    fun tracksQueueDepth() {
+        val stats = StreamStats()
+        stats.setQueueDepth(3)
+        assertEquals(3, stats.currentQueueDepth)
+    }
 }
 
 class DecodeQueueTest {

@@ -30,6 +30,15 @@ class ProtocolTest {
     }
 
     @Test
+    fun usbRequestIsCtrlSeven() {
+        val frame = decodeSingle(
+            Messages.encodeFrame(MessageType.CTRL.id, byteArrayOf(Ctrl.USB_REQUEST.toByte()))
+        )
+        assertEquals(MessageType.CTRL.id, frame.type)
+        assertEquals(7, frame.payload[0].toInt())
+    }
+
+    @Test
     fun helloMatchesSharedVector() {
         val vector = vectors.getJSONObject("hello")
         val expected = vector.getJSONObject("fields")

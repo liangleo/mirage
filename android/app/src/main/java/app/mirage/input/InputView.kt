@@ -18,7 +18,6 @@ class InputView @JvmOverloads constructor(
 ) : View(context, attrs) {
     var surfaceView: View? = null
     var onFrame: ((TouchFrame) -> Unit)? = null
-    var excludeRightPx: Float = 24f * resources.displayMetrics.density
 
     var inputEnabled: Boolean = false
         set(value) {
@@ -39,9 +38,6 @@ class InputView @JvmOverloads constructor(
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (!inputEnabled) return false
         if (surfaceView == null || !updateContentRect()) return false
-        if (event.actionMasked == MotionEvent.ACTION_DOWN && event.x >= width - excludeRightPx) {
-            return false
-        }
 
         val action = when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> TouchAction.DOWN

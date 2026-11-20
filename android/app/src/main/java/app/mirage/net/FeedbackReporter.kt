@@ -5,6 +5,9 @@ class FeedbackReporter(
     private val lossPermille: () -> Int = { 0 },
     private val decodeMS: () -> Int = { 0 },
     private val rttMS: () -> Int = { 0 },
+    private val droppedFrames: () -> Int = { 0 },
+    private val queueDepth: () -> Int = { 0 },
+    private val arrivalDelayMS: () -> Int = { 0 },
     private val intervalMillis: Long = 100,
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val clockNanos: () -> Long = System::nanoTime
@@ -60,12 +63,12 @@ class FeedbackReporter(
         return Feedback(
             fpsX10 = (fps * 10).coerceIn(0, 0xffff),
             decodeMS = decodeMS().coerceIn(0, 0xffff),
-            droppedFrames = 0,
-            queueDepth = 0,
+            droppedFrames = droppedFrames().coerceIn(0, 0xffff),
+            queueDepth = queueDepth().coerceIn(0, 0xffff),
             rttMS = rttMS().coerceIn(0, 0xffff),
             lossPermille = lossPermille().coerceIn(0, 0xffff),
             recvBitrateBps = bitrate.coerceIn(0, 0xffffffffL),
-            arrivalDelayMS = 0,
+            arrivalDelayMS = arrivalDelayMS().toLong().coerceIn(0, 0xffffffffL),
             timestampMicros = clockNanos() / 1000
         )
     }

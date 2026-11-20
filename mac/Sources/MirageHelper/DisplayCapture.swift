@@ -30,6 +30,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var emittedFrames = 0
     private let forceLock = NSLock()
     private var forceNextFrame = false
+    private var lastCompleteBuffer: CVPixelBuffer?
 
     public init(displayID: CGDirectDisplayID, fps: Int, size: CaptureSize? = nil, onFrame: @escaping FrameHandler) {
         self.displayID = displayID
@@ -94,16 +95,26 @@ public final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @
         guard let list = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let attachments = list.first else { return }
 
-        if let raw = attachments[SCStreamFrameInfo.status] as? Int,
-           let status = SCFrameStatus(rawValue: raw),
-           status != .complete {
-            return
-        }
-        completeFrames += 1
         let forced = takeForcedFrame()
+        let isComplete: Bool
+        if let raw = attachments[SCStreamFrameInfo.status] as? Int,
+           let status = SCFrameStatus(rawValue: raw) {
+            isComplete = status == .complete
+        } else {
+            isComplete = true
+        }
+        if !forced && !isComplete { return }
+        if isComplete { completeFrames += 1 }
         guard forced || hasNonEmptyDirtyRect(attachments) else { return }
         dirtyFrames += 1
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        var pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
+        if isComplete, let buffer = pixelBuffer {
+            lastCompleteBuffer = buffer
+        } else if forced {
+            // idle 帧可能没有有效画面；强制帧回退到最后一帧完整缓冲。
+            pixelBuffer = lastCompleteBuffer ?? pixelBuffer
+        }
+        guard let pixelBuffer else { return }
         emittedFrames += 1
         if debug && rawCallbacks % 120 == 0 {
             print("capture raw=\(rawCallbacks) complete=\(completeFrames) dirty=\(dirtyFrames) emitted=\(emittedFrames)")

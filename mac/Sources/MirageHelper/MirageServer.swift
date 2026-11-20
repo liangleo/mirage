@@ -377,6 +377,8 @@ public final class MirageServer: @unchecked Sendable {
                 if let udpConfig = self.udpConfig {
                     self.send(encodeUdpConfig(udpConfig), on: newConnection)
                 }
+                // accept 时的第一帧可能在 socket ready 之前就被广播掉，这里再要一次。
+                self.onKeyframeRequest?()
                 self.receive(on: newConnection)
             case .failed, .cancelled:
                 self.onLog?("client disconnected")
@@ -480,10 +482,21 @@ public final class MirageServer: @unchecked Sendable {
     }
 
     private var advertisedInputCaps: UInt8 {
-        if connectionSecure || bindAddress == .ipv4(.loopback) {
+        // AOA 桥通过 127.0.0.1 明文连接；helper 同时开 Wi-Fi 时 bindAddress 为 nil，
+        // 不能因此把 USB 会话误判成不安全链路而禁用输入。
+        if connectionSecure || isLoopbackConnection || bindAddress == .ipv4(.loopback) {
             return inputCaps
         }
         return 0
+    }
+
+    private var isLoopbackConnection: Bool {
+        guard let endpoint = connection?.currentPath?.remoteEndpoint else { return false }
+        if case let .hostPort(host, _) = endpoint {
+            let text = "\(host)"
+            return text == "127.0.0.1" || text == "::1" || text == "localhost"
+        }
+        return false
     }
 
     private func deliverInput(_ event: InputEvent, on connection: NWConnection) {

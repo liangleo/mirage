@@ -26,6 +26,7 @@ object Ctrl {
     const val INPUT_DISABLED = 4
     const val UDP_FAILED = 5
     const val UDP_READY = 6
+    const val USB_REQUEST = 7
 }
 
 data class Frame(val type: Int, val payload: ByteArray)

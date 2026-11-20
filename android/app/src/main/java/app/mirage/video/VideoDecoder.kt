@@ -54,6 +54,7 @@ class VideoDecoder(
             waitingForKeyframe = true
             onNeedKeyframe()
         }
+        stats.setQueueDepth(queue.size())
     }
 
     fun release() {
@@ -85,6 +86,7 @@ class VideoDecoder(
         var firstKeyframe: VideoFrame? = null
         while (running && firstKeyframe == null) {
             val frame = queue.poll(100) ?: continue
+            stats.setQueueDepth(queue.size())
             if (frame.header.flags and 1 != 0) {
                 firstKeyframe = frame
             }
@@ -117,6 +119,7 @@ class VideoDecoder(
         while (running) {
             if (waitingForKeyframe) {
                 val candidate = queue.poll(50) ?: continue
+                stats.setQueueDepth(queue.size())
                 if (candidate.header.flags and 1 == 0) continue
                 waitingForKeyframe = false
                 try {
@@ -128,6 +131,7 @@ class VideoDecoder(
             }
 
             val frame = pending ?: queue.poll(50)
+            stats.setQueueDepth(queue.size())
             if (frame == null) {
                 drainOutput()
                 continue

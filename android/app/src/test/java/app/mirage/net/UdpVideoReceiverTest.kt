@@ -17,12 +17,16 @@ class UdpVideoReceiverTest {
     private val frames = mutableListOf<VideoFrame>()
     private var seq = 1L
 
-    private fun receiver(rttNanos: Long = 20_000_000L) = UdpVideoReceiver(
+    private fun receiver(
+        onKeyframeNeeded: () -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) = UdpVideoReceiver(
         key = key,
         noncePrefix = noncePrefix,
         cipher = UdpCipher.AES_256_GCM,
         onFrame = { frames.add(it) },
-        rttNanos = { rttNanos }
+        onKeyframeNeeded = onKeyframeNeeded,
+        onFailure = onFailure
     )
 
     private fun headerBytes(
@@ -31,7 +35,8 @@ class UdpVideoReceiverTest {
         count: Int,
         flags: Int,
         payloadLength: Int,
-        seq: Long
+        seq: Long,
+        captureTsMicros: Long = 0
     ): ByteArray = ByteBuffer.allocate(UdpVideoHeader.SIZE)
         .order(ByteOrder.BIG_ENDIAN)
         .putInt(seq.toInt())
@@ -41,6 +46,7 @@ class UdpVideoReceiverTest {
         .put(flags.toByte())
         .put(0)
         .putShort(payloadLength.toShort())
+        .putLong(captureTsMicros)
         .array()
 
     private fun datagram(
@@ -48,14 +54,15 @@ class UdpVideoReceiverTest {
         index: Int,
         count: Int,
         payload: ByteArray,
-        keyFrame: Boolean = false
+        keyFrame: Boolean = false,
+        captureTsMicros: Long = 0
     ): ByteArray {
         var flags = 0
         if (index == 0) flags = flags or UdpFlags.SOF
         if (index == count - 1) flags = flags or UdpFlags.EOF
         if (keyFrame) flags = flags or UdpFlags.KEY
         val sequence = seq++
-        val header = headerBytes(frameID, index, count, flags, payload.size + 16, sequence)
+        val header = headerBytes(frameID, index, count, flags, payload.size + 16, sequence, captureTsMicros)
 
         val nonce = ByteArray(12)
         System.arraycopy(noncePrefix, 0, nonce, 0, 4)
@@ -173,7 +180,7 @@ class UdpVideoReceiverTest {
         val oversized = ByteBuffer.allocate(UdpVideoHeader.SIZE + 1217)
             .order(ByteOrder.BIG_ENDIAN)
             .putInt(1).putInt(1).putShort(0).putShort(1)
-            .put(0).put(0).putShort(1217)
+            .put(0).put(0).putShort(1217).putLong(0)
             .put(ByteArray(1217))
             .array()
         assertTrue(receiver.feed(oversized, nowNanos = 0).isEmpty())
@@ -181,7 +188,16 @@ class UdpVideoReceiverTest {
     }
 
     @Test
-    fun helloMarksReceiverReady() {
+    fun captureTimestampReachesVideoFrame() {
+        val receiver = receiver()
+        receiver.feed(datagram(11, 0, 1, ByteArray(4) { 1 }, captureTsMicros = 123_456), nowNanos = 0)
+
+        assertEquals(1, frames.size)
+        assertEquals(123_456L, frames[0].header.captureTimestampMicros)
+    }
+
+    @Test
+    fun helloAckDoesNotBecomeReady() {
         var ready = false
         val receiver = UdpVideoReceiver(
             key = key,
@@ -197,7 +213,97 @@ class UdpVideoReceiverTest {
             )
         )
         receiver.feed(hello, nowNanos = 0)
-        assertTrue(ready)
+        assertTrue(!ready)
         assertNotNull(receiver)
+    }
+
+    @Test
+    fun firstCompleteFrameTriggersReadyOnce() {
+        var readyCount = 0
+        val receiver = UdpVideoReceiver(
+            key = key,
+            noncePrefix = noncePrefix,
+            cipher = UdpCipher.AES_256_GCM,
+            onFrame = { frames.add(it) },
+            onReady = { readyCount++ }
+        )
+        receiver.feed(datagram(1, 0, 1, ByteArray(4) { 1 }), nowNanos = 0)
+        receiver.feed(datagram(2, 0, 1, ByteArray(4) { 2 }), nowNanos = 10)
+
+        assertEquals(1, readyCount)
+        assertEquals(2, frames.size)
+    }
+
+    @Test
+    fun framesAreDeliveredInFrameIdOrder() {
+        val receiver = receiver()
+        receiver.feed(datagram(1, 0, 2, ByteArray(4) { 1 }), nowNanos = 0)
+        receiver.feed(datagram(2, 0, 1, ByteArray(4) { 2 }), nowNanos = 5)
+        assertTrue(frames.isEmpty())
+
+        receiver.feed(datagram(1, 1, 2, ByteArray(4) { 1 }), nowNanos = 10)
+        assertEquals(listOf(1L, 2L), frames.map { it.header.frameID })
+    }
+
+    @Test
+    fun missingHeadAbandonedAfter200msAndRequestsKeyframe() {
+        var keyframes = 0
+        val receiver = receiver(onKeyframeNeeded = { keyframes++ })
+        receiver.feed(datagram(1, 0, 2, ByteArray(4) { 1 }), nowNanos = 0)
+        receiver.feed(datagram(2, 0, 1, ByteArray(4) { 2 }), nowNanos = 5)
+
+        receiver.tick(nowNanos = 100_000_000L)
+        assertTrue(frames.isEmpty())
+
+        receiver.tick(nowNanos = 250_000_000L)
+        assertEquals(1, frames.size)
+        assertEquals(2L, frames[0].header.frameID)
+        assertTrue(keyframes >= 1)
+    }
+
+    @Test
+    fun nackIsSentAtMostThreeRounds() {
+        val receiver = receiver()
+        receiver.feed(datagram(1, 0, 2, ByteArray(4) { 1 }), nowNanos = 0)
+        receiver.feed(datagram(2, 0, 1, ByteArray(4) { 2 }), nowNanos = 0)
+
+        assertEquals(1, receiver.tick(nowNanos = 7_000_000L).size)
+        assertEquals(1, receiver.tick(nowNanos = 20_000_000L).size)
+        assertEquals(1, receiver.tick(nowNanos = 33_000_000L).size)
+        assertTrue(receiver.tick(nowNanos = 60_000_000L).isEmpty())
+    }
+
+    @Test
+    fun failsAfter30sWithoutAnyFrame() {
+        var failure: String? = null
+        val receiver = receiver(onFailure = { failure = it })
+        receiver.feed(datagram(1, 0, 2, ByteArray(4) { 1 }), nowNanos = 0)
+        receiver.tick(nowNanos = 29_000_000_000L)
+        assertTrue(failure == null)
+
+        receiver.tick(nowNanos = 31_000_000_000L)
+        assertEquals("UDP 无响应", failure)
+    }
+
+    @Test
+    fun failsAfter10sSilenceOnceStreaming() {
+        var failure: String? = null
+        val receiver = receiver(onFailure = { failure = it })
+        receiver.feed(datagram(1, 0, 1, ByteArray(4) { 1 }), nowNanos = 0)
+        receiver.tick(nowNanos = 9_000_000_000L)
+        assertTrue(failure == null)
+
+        receiver.tick(nowNanos = 11_000_000_000L)
+        assertEquals("UDP 无数据", failure)
+    }
+
+    @Test
+    fun lateDuplicateAfterDeliveryIsIgnored() {
+        val receiver = receiver()
+        receiver.feed(datagram(1, 0, 1, ByteArray(4) { 1 }), nowNanos = 0)
+        receiver.feed(datagram(1, 0, 1, ByteArray(4) { 9 }), nowNanos = 5)
+        receiver.feed(datagram(2, 0, 1, ByteArray(4) { 2 }), nowNanos = 10)
+
+        assertEquals(listOf(1L, 2L), frames.map { it.header.frameID })
     }
 }

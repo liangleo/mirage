@@ -175,6 +175,10 @@ export class ClientSession {
     }
   }
 
+  setKeyboardEnabled(enabled: boolean): void {
+    this.gate.setKeyboardEnabled(enabled);
+  }
+
   sendPointer(samples: PointerSample[]): void {
     if (!this.gate.allow()) {
       return;
@@ -187,14 +191,14 @@ export class ClientSession {
   }
 
   sendKey(key: KeyInput): void {
-    if (!this.gate.allow()) {
+    if (!this.gate.allowKeyboard()) {
       return;
     }
     this.send(encodeKeyFrame(key));
   }
 
   sendText(text: TextInput): void {
-    if (!this.gate.allow()) {
+    if (!this.gate.allowKeyboard()) {
       return;
     }
     try {

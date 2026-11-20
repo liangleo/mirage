@@ -222,6 +222,25 @@ static int write_all(int fd, const unsigned char *data, size_t length) {
     return 0;
 }
 
+/* Keep the last HELLO the device sent so a restarted helper gets the current
+ * orientation instead of the one from when the cable was plugged in. */
+static void cache_hello(const unsigned char *data, size_t length) {
+    size_t offset = 0;
+    while (offset + 5 <= length) {
+        uint32_t frame_length = ((uint32_t)data[offset] << 24) |
+                                ((uint32_t)data[offset + 1] << 16) |
+                                ((uint32_t)data[offset + 2] << 8) |
+                                (uint32_t)data[offset + 3];
+        if (frame_length < 1 || frame_length > 64 * 1024) return;
+        if (offset + 4 + frame_length > length) return;
+        if (data[offset + 4] == 1 && 4 + frame_length <= sizeof(hello_data)) {
+            memcpy(hello_data, data + offset, 4 + frame_length);
+            hello_length = (int)(4 + frame_length);
+        }
+        offset += 4 + frame_length;
+    }
+}
+
 static void *usb_to_tcp(void *unused) {
     (void)unused;
     unsigned char buffer[USB_BUFFER];
@@ -237,6 +256,8 @@ static void *usb_to_tcp(void *unused) {
             fprintf(stderr, "usb read stopped rc=%d transferred=%d\n", rc, transferred);
             break;
         }
+
+        cache_hello(buffer, (size_t)transferred);
 
         pthread_mutex_lock(&tcp_lock);
         int fd = tcp_fd;

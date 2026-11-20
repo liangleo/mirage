@@ -241,6 +241,7 @@ struct ConnectPage {
     this.status = reason;
     this.busy = false;
     this.stopUsbWatch();
+    const hadStream = this.pushed;
     // 指纹错误是永久错误：重连只会重复失败
     if (reason.indexOf('证书指纹不匹配') >= 0) {
       this.stopRetry();
@@ -273,27 +274,33 @@ struct ConnectPage {
       this.autoStage = 0;
       this.usbDropped = false;
       hilog.info(DOMAIN, TAG, 'auto exhausted; waiting for USB after: %{public}s', reason);
+      if (!hadStream) {
+        this.usbWanted = false;
+        this.stopUsbWait();
+        this.stopRetry();
+        return;
+      }
       this.startUsbWait(cable ? 'USB 已断开，请重新插入' : '');
       this.notifyWaiting(cable ? 'USB 已断开，等待重新插入…' : '连接中断，等待 USB 重连…');
       this.startRetry();
       return;
     }
     // USB 模式：拔线与主机失联都走同一套等待 + 周期重试
-    if (this.usbWanted && shouldWaitForUsb(reason)) {
+    if (this.usbWanted && shouldWaitForUsb(reason) && hadStream) {
       const message = reason === 'USB 已断开' ? 'USB 已断开，请重新插入' : '';
       this.startUsbWait(message);
       this.notifyWaiting(message.length > 0 ? 'USB 已断开，等待重新插入…' : '正在等待 USB 重连…');
       this.startRetry();
       return;
     }
-    if (this.usbWanted && reason.indexOf('USB 权限') < 0 && reason.indexOf('USB 授权') < 0) {
+    if (this.usbWanted && hadStream && reason.indexOf('USB 权限') < 0 && reason.indexOf('USB 授权') < 0) {
       // Mac 侧退出（连接无响应等）：周期重试，服务恢复后自动连回
       this.notifyWaiting('Mac 已断开，正在重连…');
       this.startRetry();
       return;
     }
     // Wi-Fi / TCP 模式
-    if (this.mode === TransportMode.WIFI || this.mode === TransportMode.TCP) {
+    if (hadStream && (this.mode === TransportMode.WIFI || this.mode === TransportMode.TCP)) {
       this.notifyWaiting(this.mode === TransportMode.WIFI ? 'Wi-Fi 已断开，正在重连…' : '连接已断开，正在重连…');
       this.startRetry();
       return;
@@ -465,6 +472,23 @@ struct ConnectPage {
         this.connect();
       }
     });
+  }
+
+  private footerLabel(): string {
+    if (this.mode === TransportMode.WIFI) {
+      const tls = this.fingerprint.trim().length === 64;
+      const host = this.host.trim().length > 0 ? this.host.trim() : '—';
+      const port = this.portText.trim().length > 0 ? this.portText.trim() : '7778';
+      return `${tls ? 'Wi-Fi TLS' : 'Wi-Fi'} ${host}:${port}`;
+    }
+    if (this.mode === TransportMode.TCP) {
+      return 'TCP 127.0.0.1:7777';
+    }
+    if (this.mode === TransportMode.USB) {
+      return 'USB AOA';
+    }
+    return Runtime.session !== null && Runtime.transportLabel.length > 0
+      ? Runtime.transportLabel : '自动选择';
   }
 
   private selectMode(mode: TransportMode): void {
@@ -741,7 +765,7 @@ struct ConnectPage {
           })
       }
 
-      Text(Runtime.transportLabel).fontSize(12).fontColor('#777777')
+      Text(this.footerLabel()).fontSize(12).fontColor('#777777')
     }
     .width('100%')
     .height('100%')

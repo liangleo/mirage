@@ -28,7 +28,8 @@ data class UdpVideoHeader(
     val fragCount: Int,
     val flags: Int,
     val reserved: Int = 0,
-    val payloadLength: Int
+    val payloadLength: Int,
+    val captureTsMicros: Long = 0
 ) {
     val isNack: Boolean get() = flags and UdpFlags.NACK != 0
     val isHello: Boolean get() = flags and UdpFlags.HELLO != 0
@@ -37,7 +38,7 @@ data class UdpVideoHeader(
     val isEOF: Boolean get() = flags and UdpFlags.EOF != 0
 
     companion object {
-        const val SIZE = 16
+        const val SIZE = 24
         const val MAX_PAYLOAD = 1200
         const val MAX_DATAGRAM_PAYLOAD = MAX_PAYLOAD + 16
     }
@@ -88,6 +89,7 @@ object UdpProtocol {
             .put(datagram.header.flags.toByte())
             .put(datagram.header.reserved.toByte())
             .putShort(datagram.header.payloadLength.toShort())
+            .putLong(datagram.header.captureTsMicros)
             .put(payload)
             .array()
     }
@@ -106,7 +108,8 @@ object UdpProtocol {
             fragCount = buffer.getShort(10).toInt() and 0xffff,
             flags = buffer.get(12).toInt() and 0xff,
             reserved = buffer.get(13).toInt() and 0xff,
-            payloadLength = payloadLength
+            payloadLength = payloadLength,
+            captureTsMicros = buffer.getLong(16)
         )
         if (header.fragCount == 0) throw ProtocolException("udp frag count is zero")
         if (header.isNack) {

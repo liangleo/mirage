@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <title>投屏专属配色 - 深空极光</title>
+  <style>
+    body {
+      background: #0b0f19;
+      /* 模拟极深的夜空/屏幕底色 */
+      height: 100vh;
+      margin: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      user-select: none;
+    }
+
+    /* 工具栏底板：适合投屏边缘的极简毛玻璃 */
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      padding: 16px 20px;
+      background: rgba(20, 24, 35, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 20px;
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+
+    .icon-btn {
+      width: 48px;
+      height: 48px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      border-radius: 12px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.25s ease;
+    }
+
+    .icon-btn:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .icon-btn.active {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.1);
+    }
+
+    /* 基础 SVG 样式：未激活态 */
+    svg {
+      width: 24px;
+      height: 24px;
+      stroke: #6B7280;
+      /* 深空灰 */
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      fill: none;
+      transition: all 0.3s ease;
+    }
+
+    .ripple-dot {
+      fill: #6B7280;
+      stroke: none;
+      transition: all 0.3s ease;
+    }
+
+    /* ================= 投屏配色逻辑 ================= */
+
+    /* 1. 主功能激活（触控、键盘、设置）：冰川蓝 */
+    .icon-btn.input.active svg,
+    .icon-btn.keyboard.active svg,
+    .icon-btn.settings.active svg {
+      stroke: #38BDF8;
+      filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.4));
+    }
+
+    .icon-btn.input.active .ripple-dot {
+      fill: #38BDF8;
+    }
+
+    /* 2. 状态信息（感叹号）：琥珀黄 */
+    .icon-btn.info.active svg {
+      stroke: #FBBF24;
+      filter: drop-shadow(0 0 6px rgba(251, 191, 36, 0.4));
+    }
+
+    /* 3. 危险操作（断开连接）：珊瑚红 */
+    .icon-btn.disconnect.active svg {
+      stroke: #F87171;
+      filter: drop-shadow(0 0 6px rgba(248, 113, 113, 0.4));
+    }
+
+    /* 4. 关闭按钮：独立逻辑，Hover时变白，点击无激活态 */
+    .icon-btn.close:hover svg {
+      stroke: #E2E8F0;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="toolbar">
+    <!-- 1. 触摸输入 (极简波纹) -->
+    <div class="icon-btn input active" onclick="this.classList.toggle('active')" title="触摸输入">
+      <svg viewBox="0 0 24 24">
+        <circle class="ripple-dot" cx="12" cy="12" r="2" />
+        <circle cx="12" cy="12" r="7" opacity="0.6" />
+        <circle cx="12" cy="12" r="11" opacity="0.2" />
+      </svg>
+    </div>
+
+    <!-- 2. 键盘 -->
+    <div class="icon-btn keyboard" onclick="this.classList.toggle('active')" title="键盘">
+      <svg viewBox="0 0 24 24">
+        <rect x="3" y="6" width="18" height="12" rx="2.5" />
+        <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h.01M16 14h.01M12 14h.01" />
+      </svg>
+    </div>
+
+    <!-- 3. 断开连接 -->
+    <div class="icon-btn disconnect" onclick="this.classList.toggle('active')" title="断开连接">
+      <svg viewBox="0 0 24 24">
+        <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+        <path d="M15 7h2a5 5 0 0 1 4 8" />
+        <line x1="8" y1="12" x2="16" y2="12" />
+        <line x1="4" y1="20" x2="20" y2="4" />
+      </svg>
+    </div>
+
+    <!-- 4. 信息状态 (感叹号) -->
+    <div class="icon-btn info" onclick="this.classList.toggle('active')" title="状态信息">
+      <svg viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+    </div>
+
+    <!-- 5. 设置 -->
+    <div class="icon-btn settings" onclick="this.classList.toggle('active')" title="设置">
+      <svg viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3" />
+        <path
+          d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      </svg>
+    </div>
+
+    <!-- 6. 关闭 -->
+    <div class="icon-btn close" title="关闭">
+      <svg viewBox="0 0 24 24">
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
+      </svg>
+    </div>
+  </div>
+</body>
+
+</html>

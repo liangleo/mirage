@@ -2,7 +2,7 @@
 
 把 Android 平板/手机（以及鸿蒙平板/手机）变成 Mac 的扩展屏或镜像屏。
 
-支持 Wi-Fi（TLS + 指纹固定）与 USB AOA 两条通道、触控/键盘/手写笔输入、断线自动重连与自适应码率；鸿蒙侧为原生 ArkTS 客户端。MIT 许可开源。设计与计划见 `docs/`。
+支持 Wi-Fi（TLS + 指纹固定 + UDP 视频/NACK）与 USB AOA 两条通道、AUTO 自动切换（插线回切 USB）、触控/键盘/手写笔输入、断线自动重连与自适应码率；Android 与鸿蒙客户端行为对齐。MIT 许可开源。设计与计划见 `docs/`。
 
 ## 常用命令（Makefile）
 
@@ -28,7 +28,7 @@ make test.harmony    # 在鸿蒙设备上跑客户端单测
 - **Mac**：`make app` 生成 `build/.Mirage.app`，`make install.mac` 安装到 `/Applications`。默认用本机 Apple Development 证书签名；首次运行需授予「屏幕录制」，USB 输入需授予「辅助功能」。
 - **鸿蒙**：用 DevEco Studio 打开 `harmony/`，使用自己的华为账号自动签名（`harmony/build-profile.json5` 中的 `signingConfigs` 因机器而异，**不要提交**），随后 `make build.harmony`。产物为 `harmony/entry/build/default/outputs/default/entry-default-signed.hap`。
 - **Android**：`cd android && ./gradlew :app:assembleDebug`（或 `assembleRelease`，需自备签名配置）。
-- **图标**：`python3 tools/extract_icons.py assets/icon/source/contact_sheet.png assets/icon` 从总表切图，`python3 tools/gen_extra_icons.py assets/icon` 生成调试/齿轮/关闭图标（依赖 Pillow）。
+- **图标**：工具栏图标为矢量图（24×24，stroke 1.8）：Android 用 `res/drawable/ic_<action>_<state>.xml`（VectorDrawable），鸿蒙用 `media/ic_<action>_<state>.svg`。颜色：normal `#9CA3AF`；input/keyboard/settings active `#38BDF8`；debug active `#FBBF24`；disconnect active `#F87171`；close hover `#E2E8F0`。显示 20dp，按钮底 32dp 圆角 8dp（`#99141A24` + 1px `#33FFFFFF` 边框），间距 6dp。
 - 发布前跑一遍 `make test` 与 `make test.harmony`。
 
 ## 开发工具（Skills / MCP）
@@ -159,15 +159,15 @@ cd android
 
 首次构建需要联网下载依赖。
 
-- 首次启动弹出「连接设置」（Mac 地址 / 端口），保存后每次启动自动连接；如果检测到 Mirage USB accessory，会优先走 USB，无需填写地址。Wi-Fi 场景点「发现 Mac」可通过 mDNS 自动填入局域网地址。
-- 连接后点屏幕右侧的窄手柄打开控制面板；未连接时在首屏点「设置」修改地址。连接断开会自动退避重连，重连期间「连接」按钮禁用，失败后才可手动重试。
-- 通过 USB accessory 接入时，App 会由 `USB_ACCESSORY_ATTACHED` intent 自动拉起；首次需在系统弹窗授权。
-- 连接断开后自动重连期间，首屏显示圆形进度指示（spinner）并禁用「连接」按钮。
-- 设备旋转时 App 自动重连，helper 根据新的宽高重建对应方向的虚拟屏。
-- 画面按视频宽高比居中；自动分辨率下与设备比例一致，通常没有黑边，手动预设比例不同时才会留黑边。
-- 全屏沉浸式运行，系统状态栏/导航栏隐藏；连接后屏幕右侧有一个窄手柄，点开是滑出的控制面板（设置、调试开关、断开），面板带深色背景遮罩，不会再和顶部原生状态栏重叠。
-- 调试开关打开后，左下角显示帧率、码率、丢帧、软/硬解、手机与 Mac 的分辨率，以及 `decode / e2e / rtt` 三项延迟（单位均为 ms）。
-- 连接成功期间保持屏幕常亮。
+- 冷启动只显示连接页，**不自动连接**；关闭 App 视为主动断开。点「连接」才建立会话。
+- 单页连接页：主机 / 端口 / 配对链接 / 模式（AUTO / Wi-Fi / TCP / USB）/ 导入配对 / 发现 Mac / 扫码 / 连接 / 断开。竖屏单列，横屏自动左右两栏，一屏可见；浅色主题。
+- AUTO 优先 USB，其次 Wi-Fi（mDNS 自动发现），最后回环 TCP；Wi-Fi 串流时插线会自动切到 USB，拔线回到 Wi-Fi UDP。
+- 播放页全屏视频；右下角常驻设置按钮，点开向上展开 调试 / 输入 / 键盘 / 断开 四枚按钮，底部 X 收回。开关有 Toast，断开需 3 秒内点两次确认。
+- 调试浮层在左上角，两行显示 `fps / Mbps / drop / p95` 与 `decode / e2e / RTT / 编码`，右侧显示通道与分辨率（如 `Wi-Fi UDP 2800×1260`）。
+- 通过 USB accessory 接入时由 `USB_ACCESSORY_ATTACHED` 自动拉起；首次需在系统弹窗授权。
+- 断线时保留播放页并显示等待遮罩（5 分钟窗口、自动退避重连）；设备旋转会自动重发尺寸并恢复画面。
+- 画面按视频宽高比居中；自动分辨率下与设备比例一致，通常没有黑边。
+- 全屏沉浸式运行；连接成功期间保持屏幕常亮。
 - 手机重连/重启后需要重跑 `make connect` 设置 adb reverse。
 
 ## 鸿蒙（HarmonyOS）
@@ -180,7 +180,7 @@ make test.harmony    # 构建 ohosTest HAP 并在设备上跑单测
 
 - 连接方式与 Android 客户端一致：AUTO / Wi-Fi / TCP / USB 四种通道。AUTO 在检测到 Mirage USB 配件时优先走 USB，否则退回 mDNS 发现的 Wi-Fi；Wi-Fi 填了 64 位十六进制指纹走 TLS，否则明文连 TCP 端口。点「发现 Mac」用 mDNS 自动填地址。
 - TCP 模式（USB 调试通道）需要先 `make connect.harmony` 做 hdc 端口反向转发。
-- 连接后右下角有齿轮按钮：点开是 调试 / 输入 / 键盘 / 断开 四枚按钮，底部 X 收回；白 = 开启、灰 = 关闭，断开为灰→红两击确认。
+- 连接后右下角有设置按钮：点开是 调试 / 输入 / 键盘 / 断开 四枚按钮，底部 X 收回；白 = 开启、灰 = 关闭，断开为灰→红两击确认。
 - 旋转屏幕会自动上报新尺寸：Mac 重建对应方向的虚拟屏，客户端自动重连并恢复画面，无需手动断开。
 - 调试浮层第一行末尾显示当前通道与分辨率（如 `Wi-Fi 2880×1920`）。
 - **USB 为实验特性**，需要 Mac 端 AOA 桥：开启菜单栏 App 的「服务」即同时提供 USB 与 Wi-Fi；也可手动运行 `build/aoa_bridge --port 7777`（此时 helper 以 `--mode extend --port 7777` 的 loopback 模式启动）。

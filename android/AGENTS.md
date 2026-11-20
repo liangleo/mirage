@@ -8,7 +8,7 @@
 - **版本以 `app/build.gradle.kts` 为准**。仓库目前没有 `libs.versions.toml`，不要凭空引用或新建。
 - **设计令牌**：新代码的间距、颜色、字体一律从 `MaterialTheme` 获取；禁止新增硬编码 `dp` 或 `Color(0xFF...)`。需要项目级 token 时在 `ui/Theme.kt` 定义后引用。
   - 存量例外：`MainActivity.kt`、`ui/VideoView.kt` 已有硬编码尺寸。改动这些文件时就近收敛，不做无关重构。
-- **图标**：用 `material-icons-core` 的 `Icons.Outlined` 或已有 `ImageVector`；不引入新图标库。
+- **图标**：用 `material-icons-core` 的 `Icons.Outlined` 或已有 `ImageVector`；不引入新图标库。例外：播放页工具条统一使用 `assets/icon` 切出的 PNG（`res/drawable-nodpi/ic_<action>_<state>.png`，与鸿蒙 `resources/base/media` 同名），由 `DockIcons.kt` 按状态映射。
 - **动效**：用 `MaterialTheme.motionScheme`（`defaultSpatialSpec`、`fastEffectsSpec` 等）；不自定义 `tween`/`spring` 参数。
 - **列表**：带操作入口的列表项用 `ListItem`（或可用的 M3 Expressive 变体），不手写 `Row` + `Modifier.clickable`。
 - **自适应**：Compact (<600dp) `NavigationBar`；Medium (600–840dp) `NavigationRail`；Expanded (>840dp) `NavigationRail` + 双栏。当前是单屏镜像界面，没有多页导航时不要硬加。
@@ -31,9 +31,15 @@ Skills 已安装到 `.claude/skills/`（源文件 `.agents/skills/`，版本锁 
 
 ## 当前结构
 
-- `app/src/main/java/app/mirage/MainActivity.kt`：主界面（连接、悬浮工具栏、调试面板）
+- `app/src/main/java/app/mirage/MainActivity.kt`：薄壳（窗口、沉浸式、USB 广播、Compose 宿主）
+- `session/`：会话逻辑
+  - `SessionMachine.kt`：纯 reducer（Idle/Selecting/Connecting/Streaming/Recovering/Stopped）
+  - `SessionController.kt`：传输选择、重连窗口、解码器、USB 轮询与 UI 状态（StateFlow）
+  - `AutoPlan.kt` / `ReconnectPolicy.kt` / `ScreenChange.kt` / `DockState.kt` / `ConnectForm.kt` / `SettingsCodec.kt`：可单测的纯逻辑
+- `ui/`：`ConnectScreen.kt`、`StreamScreen.kt`、`ControlDock.kt`、`StatsOverlay.kt`、`Theme.kt`、`Strings.kt`、`DockIcons.kt`
 - `ui/VideoView.kt`：SurfaceView 显示
-- `net/`：协议编解码与客户端（`MirageClient`、`Protocol`、`Liveness`、`StreamStats`）
+- `net/`：协议编解码与客户端（`MirageClient`、`Protocol`、`Liveness`、`StreamStats`、UDP 收包）
+- `input/`：触控/手势/键盘/输入门控
 - `video/`：MediaCodec 解码（`VideoDecoder`、`DecodeQueue`、`AnnexB`）
 
 不要为了“整洁”搬动这些文件；结构调整单独提出来做。
