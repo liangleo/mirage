@@ -22,6 +22,9 @@ class MirageClient(
     }
 
     private val thread = Thread({ run() }, "mirage-client")
+    private val sender = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+        Thread(task, "mirage-ctrl").apply { isDaemon = true }
+    }
     private val liveness = Liveness(timeoutMs = 3_000)
 
     @Volatile
@@ -107,12 +110,14 @@ class MirageClient(
 
     private fun sendFrame(encoded: ByteArray) {
         val stream = output ?: return
-        try {
-            synchronized(stream) {
-                stream.write(encoded)
-                stream.flush()
+        sender.execute {
+            try {
+                synchronized(stream) {
+                    stream.write(encoded)
+                    stream.flush()
+                }
+            } catch (_: Exception) {
             }
-        } catch (_: Exception) {
         }
     }
 
@@ -165,6 +170,7 @@ class MirageClient(
 
     fun close() {
         running = false
+        sender.shutdownNow()
         feedback?.stop()
         udpReceiver?.stop()
         try {
@@ -240,9 +246,9 @@ class MirageClient(
             this.connection = connection
 
             val output = connection.output
-            this.output = output
             output.write(Messages.encodeHello(hello))
             output.flush()
+            this.output = output
             connectedOnce = true
             liveness.noteActivity(System.currentTimeMillis())
 

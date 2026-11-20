@@ -78,6 +78,10 @@ class SessionController(
     private var currentKind: TransportKind? = null
     private var autoStage = 0
     private var usbSwitch = UsbSwitchState()
+    private var usbCooldownUntilMs = 0L
+    private var usbSwitchInFlight = false
+    private var pendingUsbAccessory: UsbAccessory? = null
+    private var usbPermissionRequested = false
     private var usbPollRunnable: Runnable? = null
     private var lastScreen: ScreenSnapshot? = null
     private var reconnectDeadlineMs = -1L
@@ -216,20 +220,28 @@ class SessionController(
     }
 
     fun onAccessoryPermission(granted: Boolean, accessory: UsbAccessory?) {
+        usbPermissionRequested = false
+        android.util.Log.i("MirageUsb", "permission granted=$granted accessory=${accessory != null}")
         if (!userInitiated) {
             pendingAccessory = null
+            pendingUsbAccessory = null
             return
         }
-        val target = accessory ?: pendingAccessory
+        val target = accessory ?: pendingAccessory ?: pendingUsbAccessory
         pendingAccessory = null
+        pendingUsbAccessory = null
         if (granted && target != null) {
-            connect(
-                lastHost ?: savedHost,
-                lastPort.takeIf { it > 0 } ?: savedPort,
-                isReconnect = true
-            )
+            if (uiState.value.connected && currentKind != TransportKind.USB) {
+                performUsbSwitch()
+            } else {
+                connect(
+                    lastHost ?: savedHost,
+                    lastPort.takeIf { it > 0 } ?: savedPort,
+                    isReconnect = true
+                )
+            }
         } else {
-            usbSwitch = UsbSwitchState(disabled = true)
+            usbCooldownUntilMs = System.currentTimeMillis() + 15_000
             update { it.copy(connecting = false, status = "USB 权限被拒绝") }
         }
     }
@@ -253,6 +265,10 @@ class SessionController(
     fun onAccessoryDetached() {
         pendingAccessory = null
         usbSwitch = UsbSwitchPolicy.onDetach(usbSwitch)
+        usbSwitchInFlight = false
+        usbPermissionRequested = false
+        pendingUsbAccessory = null
+        usbCooldownUntilMs = 0
         resetAutoStageForWifi()
         scheduleTransportSwitch()
     }
@@ -574,7 +590,11 @@ class SessionController(
                         autoReconnectEnabled = true
                         reconnectAttempts = 0
                         autoStage = 0
-                        if (usingUsb) usbSwitch = UsbSwitchState()
+                        if (usingUsb) {
+                            usbSwitch = UsbSwitchState()
+                            usbSwitchInFlight = false
+                            usbCooldownUntilMs = 0
+                        }
                         persistWifiPairing()
                         this@SessionController.config = config
                         if (lastScreen == null) lastScreen = currentScreen()
@@ -661,6 +681,10 @@ class SessionController(
     private fun handleConnectionClosed(reason: String) {
         if (closeHandled) return
         closeHandled = true
+        android.util.Log.i("MirageUsb", "closed reason=$reason usingUsb=$usingUsb inflight=$usbSwitchInFlight")
+        if (usingUsb && !manualDisconnect) {
+            usbCooldownUntilMs = System.currentTimeMillis() + 10_000
+        }
         machineEvent(SessionEvent.Closed(reason))
         reconnectAttempts = machine.attempts
         inputController.releaseAll()
@@ -722,7 +746,8 @@ class SessionController(
         }
         if (uiState.value.transportMode == TransportMode.AUTO) {
             if (usingUsb) {
-                autoStage = 0
+                // USB 掉线（含立刻插回）先回 Wi-Fi，随后由 AUTO 轮询再切回 USB。
+                autoStage = if (savedHost.isNotBlank() && savedPort > 0) 1 else 0
                 if (savedHost.isNotBlank() && savedPort > 0) {
                     lastHost = savedHost
                     lastPort = savedPort
@@ -851,23 +876,74 @@ class SessionController(
     }
 
     private fun switchToUsb() {
-        if (currentKind == TransportKind.USB) return
+        if (currentKind == TransportKind.USB || usbSwitchInFlight) return
+        val accessory = findMirageAccessory()
+        android.util.Log.i("MirageUsb", "switchToUsb accessory=${accessory != null} permission=${accessory?.let { usbManager.hasPermission(it) }}")
+        if (accessory == null) {
+            client?.requestUsb()
+            return
+        }
+        if (!usbManager.hasPermission(accessory)) {
+            // 保持 Wi-Fi 串流，先请求授权；授权回调里再切 USB。
+            if (!usbPermissionRequested) {
+                usbPermissionRequested = true
+                pendingUsbAccessory = accessory
+                update { it.copy(status = "请在系统弹窗中允许 USB") }
+                requestUsbPermission(accessory)
+            }
+            return
+        }
         usbSwitch = UsbSwitchPolicy.onFailure(usbSwitch)
-        if (usbSwitch.disabled) return
+        if (usbSwitch.disabled) {
+            usbCooldownUntilMs = System.currentTimeMillis() + 15_000
+            return
+        }
+        performUsbSwitch()
+    }
+
+    private var usbSwitchToken = 0
+
+    private fun performUsbSwitch() {
+        if (currentKind == TransportKind.USB || usbSwitchInFlight) return
+        usbSwitchInFlight = true
+        val token = ++usbSwitchToken
         update { it.copy(connected = false, connecting = true, status = "已插回 USB，正在切换…") }
-        clientGeneration++
-        client?.close()
-        client = null
-        decoder?.release()
-        decoder = null
-        decoderSurface = null
-        config = null
-        pendingKeyframe = null
-        closeHandled = false
+        // Wi-Fi 在线时 Mac 端 AOA 桥是暂停的；先请求恢复，否则关掉 Wi-Fi 后要等 30 秒。
+        client?.requestUsb()
         mainHandler.postDelayed({
-            if (activity.isFinishing || activity.isDestroyed) return@postDelayed
+            if (activity.isFinishing || activity.isDestroyed || token != usbSwitchToken) return@postDelayed
+            clientGeneration++
+            client?.close()
+            client = null
+            decoder?.release()
+            decoder = null
+            decoderSurface = null
+            config = null
+            pendingKeyframe = null
+            closeHandled = false
+            awaitUsbAccessory(token, 0)
+        }, 400)
+    }
+
+    private fun awaitUsbAccessory(token: Int, attempt: Int) {
+        if (activity.isFinishing || activity.isDestroyed || token != usbSwitchToken) return
+        val accessory = findMirageAccessory()
+        if (accessory != null || (BuildConfig.DEBUG && fakeUsbAttached)) {
+            android.util.Log.i("MirageUsb", "awaitUsbAccessory hit attempt=$attempt")
             connect(lastHost ?: savedHost, lastPort.takeIf { it > 0 } ?: savedPort, isReconnect = true)
-        }, 300)
+            return
+        }
+        if (attempt >= 33) {
+            android.util.Log.i("MirageUsb", "awaitUsbAccessory timeout, fallback wifi")
+            usbSwitchInFlight = false
+            usbCooldownUntilMs = System.currentTimeMillis() + 10_000
+            usbSwitch = UsbSwitchPolicy.onFailure(usbSwitch)
+            if (savedHost.isNotBlank() && savedPort > 0) {
+                connect(savedHost, savedPort, isReconnect = true)
+            }
+            return
+        }
+        mainHandler.postDelayed({ awaitUsbAccessory(token, attempt + 1) }, 300)
     }
 
     private fun startUsbPolling() {
@@ -878,11 +954,16 @@ class SessionController(
                 val state = uiState.value
                 val kind = currentKind
                 if (kind != null && AutoPlan.shouldPollUsb(state.transportMode, state.connected, kind)) {
+                    val now = System.currentTimeMillis()
+                    if (usbSwitch.disabled && now >= usbCooldownUntilMs) {
+                        usbSwitch = UsbSwitchState()
+                    }
                     val accessory = findMirageAccessory()
-                    if (accessory != null) {
+                    val wantRequest = AutoPlan.shouldSendUsbRequest(state.transportMode, state.connected, kind)
+                    val cooling = now < usbCooldownUntilMs
+                    if (wantRequest) client?.requestUsb()
+                    if (accessory != null && !usbSwitchInFlight && !cooling) {
                         switchToUsb()
-                    } else if (AutoPlan.shouldSendUsbRequest(state.transportMode, state.connected, kind)) {
-                        client?.requestUsb()
                     }
                 }
                 mainHandler.postDelayed(this, 3_000)

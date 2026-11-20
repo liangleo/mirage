@@ -34,6 +34,7 @@
 static volatile sig_atomic_t stopping = 0;
 static volatile sig_atomic_t paused = 0;
 static volatile sig_atomic_t graceful_stop = 0;
+static volatile sig_atomic_t session_abort = 0;
 static libusb_context *usb_ctx = NULL;
 static libusb_device_handle *usb_handle = NULL;
 static unsigned char endpoint_in = 0;
@@ -244,7 +245,7 @@ static void cache_hello(const unsigned char *data, size_t length) {
 static void *usb_to_tcp(void *unused) {
     (void)unused;
     unsigned char buffer[USB_BUFFER];
-    while (!stopping && !paused) {
+    while (!stopping && !paused && !session_abort) {
         int transferred = 0;
         int rc = libusb_bulk_transfer(
             usb_handle, endpoint_in, buffer, sizeof(buffer), &transferred, 1000
@@ -254,6 +255,7 @@ static void *usb_to_tcp(void *unused) {
         if (rc == LIBUSB_ERROR_TIMEOUT && transferred <= 0) continue;
         if (rc != 0 && transferred <= 0) {
             fprintf(stderr, "usb read stopped rc=%d transferred=%d\n", rc, transferred);
+            session_abort = 1;
             break;
         }
 
@@ -273,7 +275,7 @@ static void *usb_to_tcp(void *unused) {
         }
         pthread_mutex_unlock(&tcp_lock);
     }
-    if (!paused) stopping = 1;
+    if (!paused) session_abort = 1;
     pthread_mutex_lock(&tcp_lock);
     if (tcp_fd >= 0) shutdown(tcp_fd, SHUT_RDWR);
     pthread_mutex_unlock(&tcp_lock);
@@ -281,7 +283,7 @@ static void *usb_to_tcp(void *unused) {
 }
 
 static int connect_helper_with_retry(void) {
-    while (!stopping && !paused) {
+    while (!stopping && !paused && !session_abort) {
         int fd = connect_tcp(port_number);
         if (fd >= 0) {
             int one = 1;
@@ -302,7 +304,7 @@ static void *tcp_to_usb(void *unused) {
      * Exit so the supervisor re-does the AOA handshake for a fresh session. */
     int out_timeouts = 0;
 
-    while (!stopping && !paused) {
+    while (!stopping && !paused && !session_abort) {
         if (fd < 0) {
             fd = connect_helper_with_retry();
             if (fd < 0) break;
@@ -320,7 +322,7 @@ static void *tcp_to_usb(void *unused) {
 
         ssize_t read_count;
         if (wait_fd(fd, POLLIN) != 0) {
-            stopping = 1;
+            if (!stopping) session_abort = 1;
             break;
         }
         read_count = recv(fd, buffer, sizeof(buffer), 0);
@@ -332,6 +334,7 @@ static void *tcp_to_usb(void *unused) {
             if (tcp_fd == old_fd) tcp_fd = -1;
             pthread_mutex_unlock(&tcp_lock);
             fd = -1;
+            if (!stopping && !paused && !session_abort) usleep(200000);
             continue;
         }
 
@@ -359,8 +362,7 @@ static void *tcp_to_usb(void *unused) {
                         read_count > 4 ? buffer[1] : 0, read_count > 4 ? buffer[2] : 0,
                         read_count > 4 ? buffer[3] : 0, read_count > 4 ? buffer[4] : 0);
                     fflush(stderr);
-                    stopping = 1;
-                    graceful_stop = 1;
+                    session_abort = 1;
                     break;
                 }
                 continue;
@@ -368,14 +370,14 @@ static void *tcp_to_usb(void *unused) {
             out_timeouts = 0;
             if (rc != 0 || transferred <= 0) {
                 fprintf(stderr, "usb write stopped rc=%d transferred=%d\n", rc, transferred);
-                stopping = 1;
+                session_abort = 1;
                 break;
             }
         }
     }
 
     if (fd >= 0) close(fd);
-    if (!paused) stopping = 1;
+    if (!paused) session_abort = 1;
     pthread_mutex_lock(&tcp_lock);
     if (tcp_fd >= 0) shutdown(tcp_fd, SHUT_RDWR);
     pthread_mutex_unlock(&tcp_lock);
@@ -450,11 +452,27 @@ int main(int argc, char **argv) {
     pthread_create(&control, NULL, control_thread, NULL);
 
     int bye_sent = 0;
+    int paused_reset_done = 0;
     while (!stopping) {
         if (paused) {
+            if (!paused_reset_done) {
+                // Leave accessory mode while paused so the phone shows a usable
+                // USB accessory only when the bridge can actually serve it.
+                paused_reset_done = 1;
+                libusb_device *acc = find_accessory_device();
+                if (acc != NULL) {
+                    libusb_device_handle *handle = NULL;
+                    if (libusb_open(acc, &handle) == 0) {
+                        libusb_reset_device(handle);
+                        libusb_close(handle);
+                    }
+                    libusb_unref_device(acc);
+                }
+            }
             usleep(200000);
             continue;
         }
+        paused_reset_done = 0;
 
         libusb_device *accessory = find_accessory_device();
         int existing_accessory = accessory != NULL;
@@ -547,7 +565,7 @@ int main(int argc, char **argv) {
         fflush(stdout);
         unsigned char first[USB_BUFFER];
         int first_length = 0;
-        while (!stopping && !paused && first_length <= 0) {
+        while (!stopping && !paused && !session_abort && first_length <= 0) {
             int rc_bulk = libusb_bulk_transfer(
                 usb_handle, endpoint_in, first, sizeof(first), &first_length, 1000
             );
@@ -612,6 +630,22 @@ int main(int argc, char **argv) {
             libusb_release_interface(usb_handle, 0);
             libusb_close(usb_handle);
             usb_handle = NULL;
+        }
+        if (session_abort) {
+            // Restart just this session: exit accessory mode so the phone can
+            // re-enumerate, but keep the process and control port alive.
+            session_abort = 0;
+            libusb_device *acc = find_accessory_device();
+            if (acc != NULL) {
+                libusb_device_handle *handle = NULL;
+                if (libusb_open(acc, &handle) == 0) {
+                    libusb_reset_device(handle);
+                    libusb_close(handle);
+                }
+                libusb_unref_device(acc);
+            }
+            usleep(300000);
+            continue;
         }
         if (!paused && !stopping) usleep(200000);
     }
